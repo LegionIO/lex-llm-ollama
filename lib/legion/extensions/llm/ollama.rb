@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
-require 'legion/extensions/llm/ollama/provider_settings'
+require 'legion/extensions/llm/ollama/provider'
 require 'legion/extensions/llm/ollama/version'
 
 module Legion
@@ -14,7 +14,7 @@ module Legion
         PROVIDER_FAMILY = :ollama
 
         def self.default_settings
-          ProviderSettings.build(
+          ::Legion::Extensions::Llm.provider_settings(
             family: PROVIDER_FAMILY,
             instance: {
               endpoint: 'http://localhost:11434',
@@ -25,7 +25,14 @@ module Legion
             }
           )
         end
+
+        def self.provider_class
+          Provider
+        end
       end
     end
   end
 end
+
+LexLLM::Provider.register(Legion::Extensions::Llm::Ollama::PROVIDER_FAMILY,
+                          Legion::Extensions::Llm::Ollama::Provider)
