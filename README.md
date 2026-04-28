@@ -6,7 +6,7 @@ This gem lives under `Legion::Extensions::Llm::Ollama` and depends on `lex-llm` 
 
 ## What It Provides
 
-- `LexLLM::Provider` registration as `:ollama`
+- `Legion::Extensions::Llm::Provider` registration as `:ollama`
 - Ollama-native chat requests through `POST /api/chat`
 - streaming chat support
 - model discovery through `GET /api/tags`
@@ -37,7 +37,7 @@ Legion::Extensions::Llm::Ollama.default_settings
 ## Configuration
 
 ```ruby
-LexLLM.configure do |config|
+Legion::Extensions::Llm.configure do |config|
   config.ollama_api_base = "http://localhost:11434"
   config.default_model = "qwen3.6:27b"
   config.default_embedding_model = "nomic-embed-text:latest"

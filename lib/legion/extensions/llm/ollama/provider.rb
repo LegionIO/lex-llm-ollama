@@ -1,14 +1,14 @@
 # frozen_string_literal: true
 
-require 'lex_llm'
+require 'legion/extensions/llm'
 require 'legion/json'
 
 module Legion
   module Extensions
     module Llm
       module Ollama
-        # Ollama provider implementation for the LexLLM base provider contract.
-        class Provider < LexLLM::Provider # rubocop:disable Metrics/ClassLength
+        # Ollama provider implementation for the Legion::Extensions::Llm base provider contract.
+        class Provider < Legion::Extensions::Llm::Provider # rubocop:disable Metrics/ClassLength
           class << self
             def slug = 'ollama'
             def local? = true
@@ -80,7 +80,7 @@ module Legion
           end
 
           def format_content(content)
-            return content.format if content.is_a?(LexLLM::Content::Raw)
+            return content.format if content.is_a?(Legion::Extensions::Llm::Content::Raw)
             return content.text.to_s if content.respond_to?(:text)
 
             content.to_s
@@ -120,7 +120,7 @@ module Legion
           def parse_completion_response(response)
             body = response.body
             message = body.fetch('message', {})
-            LexLLM::Message.new(
+            Legion::Extensions::Llm::Message.new(
               role: :assistant,
               content: message['content'],
               model_id: body['model'],
@@ -133,7 +133,7 @@ module Legion
 
           def build_chunk(data)
             message = data.fetch('message', {})
-            LexLLM::Chunk.new(
+            Legion::Extensions::Llm::Chunk.new(
               role: :assistant,
               content: message['content'],
               model_id: data['model'],
@@ -150,7 +150,7 @@ module Legion
               function = call.fetch('function', {})
               [
                 function.fetch('name').to_sym,
-                LexLLM::ToolCall.new(
+                Legion::Extensions::Llm::ToolCall.new(
                   id: call['id'] || function['name'],
                   name: function['name'],
                   arguments: function['arguments'] || {}
@@ -161,7 +161,7 @@ module Legion
 
           def parse_list_models_response(response, provider, _capabilities)
             response.body.fetch('models', []).map do |model|
-              LexLLM::Model::Info.new(
+              Legion::Extensions::Llm::Model::Info.new(
                 id: model.fetch('name'),
                 name: model.fetch('name'),
                 provider: provider,
@@ -186,7 +186,8 @@ module Legion
                         body['embeddings']&.first
                       end
 
-            LexLLM::Embedding.new(vectors: vectors, model: model, input_tokens: body['prompt_eval_count'].to_i)
+            Legion::Extensions::Llm::Embedding.new(vectors: vectors, model: model,
+                                                   input_tokens: body['prompt_eval_count'].to_i)
           end
         end
       end

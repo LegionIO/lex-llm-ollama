@@ -3,8 +3,8 @@
 require 'spec_helper'
 
 RSpec.describe Legion::Extensions::Llm::Ollama do
-  let(:provider) { described_class::Provider.new(LexLLM.config) }
-  let(:qwen_model) { LexLLM::Model::Info.new(id: 'qwen3.6:27b', provider: :ollama) }
+  let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
+  let(:qwen_model) { Legion::Extensions::Llm::Model::Info.new(id: 'qwen3.6:27b', provider: :ollama) }
 
   it 'exposes provider defaults with inherited fleet settings' do
     settings = described_class.default_settings
@@ -15,8 +15,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(settings.dig(:instances, :default, :usage, :embedding)).to be true
   end
 
-  it 'registers the LexLLM provider class' do
-    expect(LexLLM::Provider.resolve(:ollama)).to eq(described_class::Provider)
+  it 'registers the Legion::Extensions::Llm provider class' do
+    expect(Legion::Extensions::Llm::Provider.resolve(:ollama)).to eq(described_class::Provider)
   end
 
   it 'exposes provider base endpoint helpers' do
@@ -47,7 +47,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
   end
 
   def chat_payload
-    message = LexLLM::Message.new(role: :user, content: 'hello')
+    message = Legion::Extensions::Llm::Message.new(role: :user, content: 'hello')
     provider.send(:render_payload, [message], tools: {}, temperature: 0.2, model: qwen_model, stream: false,
                                               schema: nil, thinking: true, tool_prefs: nil)
   end
