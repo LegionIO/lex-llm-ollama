@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
+require 'legion/extensions/llm/ollama/registry_event_builder'
 require 'legion/extensions/llm/ollama/provider'
+require 'legion/extensions/llm/ollama/registry_publisher'
 require 'legion/extensions/llm/ollama/version'
 
 module Legion

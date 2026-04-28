@@ -9,11 +9,17 @@ module Legion
         # Ollama provider implementation for the Legion::Extensions::Llm base provider contract.
         class Provider < Legion::Extensions::Llm::Provider # rubocop:disable Metrics/ClassLength
           class << self
+            attr_writer :registry_publisher
+
             def slug = 'ollama'
             def local? = true
             def configuration_options = %i[ollama_api_base ollama_keep_alive]
             def configuration_requirements = []
             def capabilities = Capabilities
+
+            def registry_publisher
+              @registry_publisher ||= RegistryPublisher.new
+            end
           end
 
           # Capability predicates for Ollama model offerings.
@@ -42,6 +48,18 @@ module Legion
 
           def list_running_models
             connection.get(running_models_url).body.fetch('models', [])
+          end
+
+          def readiness(live: false)
+            super.tap do |metadata|
+              self.class.registry_publisher.publish_readiness_async(metadata) if live
+            end
+          end
+
+          def list_models
+            super.tap do |models|
+              self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
+            end
           end
 
           def show_model(model)

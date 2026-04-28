@@ -16,6 +16,7 @@ Load it with `require 'legion/extensions/llm/ollama'`.
 - model details through `POST /api/show`
 - model download helper through `POST /api/pull`
 - embeddings through `POST /api/embed`
+- best-effort `llm.registry` availability events from readiness and model discovery when Legion Transport is loaded
 - shared fleet/default settings via `Legion::Extensions::Llm.provider_settings`
 
 ## Defaults

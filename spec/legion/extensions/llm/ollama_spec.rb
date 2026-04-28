@@ -5,6 +5,7 @@ require 'spec_helper'
 RSpec.describe Legion::Extensions::Llm::Ollama do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
   let(:qwen_model) { Legion::Extensions::Llm::Model::Info.new(id: 'qwen3.6:27b', provider: :ollama) }
+  let(:registry_publisher) { instance_double(described_class::RegistryPublisher) }
 
   it 'exposes provider defaults with inherited fleet settings' do
     settings = described_class.default_settings
@@ -46,6 +47,33 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect([current.vectors, current.input_tokens, legacy.vectors]).to eq([[0.1, 0.2], 3, [0.3, 0.4]])
   end
 
+  it 'publishes live readiness asynchronously through the registry publisher' do
+    stub_registry_publisher
+
+    readiness = provider.readiness(live: true)
+
+    expect(registry_publisher).to have_received(:publish_readiness_async).with(readiness)
+  end
+
+  it 'publishes discovered models asynchronously through the registry publisher' do
+    stub_registry_publisher
+    stub_model_discovery
+
+    models = provider.list_models
+
+    expect(registry_publisher).to have_received(:publish_models_async)
+      .with(models, readiness: hash_including(provider: :ollama, live: false))
+  end
+
+  it 'builds sanitized lex-llm registry events for Ollama model availability' do
+    events = capture_registry_events([nomic_embed_model], readiness: { ready: true })
+
+    expect(events.first.to_h).to include(event_type: :offering_available)
+    expect(events.first.to_h.dig(:offering, :provider_family)).to eq(:ollama)
+    expect(events.first.to_h.dig(:offering, :usage_type)).to eq(:embedding)
+    expect(events.first.to_h.dig(:offering, :model)).to eq('nomic-embed-text:latest')
+  end
+
   def chat_payload
     message = Legion::Extensions::Llm::Message.new(role: :user, content: 'hello')
     provider.send(:render_payload, [message], tools: {}, temperature: 0.2, model: qwen_model, stream: false,
@@ -58,5 +86,36 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
   def fake_response(body)
     Struct.new(:body).new(body)
+  end
+
+  def nomic_embed_model
+    Legion::Extensions::Llm::Model::Info.new(
+      id: 'nomic-embed-text:latest',
+      name: 'nomic-embed-text:latest',
+      provider: :ollama,
+      metadata: { 'details' => { 'family' => 'nomic-bert', 'parameter_size' => '137M' } }
+    )
+  end
+
+  def stub_model_discovery
+    allow(provider.connection).to receive(:get).with('/api/tags').and_return(
+      fake_response({ 'models' => [{ 'name' => 'qwen3.6:27b', 'details' => { 'family' => 'qwen35' } }] })
+    )
+  end
+
+  def stub_registry_publisher
+    allow(described_class::Provider).to receive(:registry_publisher).and_return(registry_publisher)
+    allow(registry_publisher).to receive(:publish_readiness_async)
+    allow(registry_publisher).to receive(:publish_models_async)
+  end
+
+  def capture_registry_events(models, readiness:)
+    publisher = described_class::RegistryPublisher.new
+    events = []
+    allow(publisher).to receive(:publishing_available?).and_return(true)
+    allow(publisher).to receive(:publish_event) { |event| events << event }
+    allow(Thread).to receive(:new).and_yield
+    publisher.publish_models_async(models, readiness:)
+    events
   end
 end

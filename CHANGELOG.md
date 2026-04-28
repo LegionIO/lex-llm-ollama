@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5 - 2026-04-28
+
+- Publish best-effort provider/model availability events to `llm.registry` from Ollama readiness and model discovery.
+
 ## 0.1.4 - 2026-04-28
 
 - Require current shared Legion JSON, logging, settings, and LLM extension gems.
