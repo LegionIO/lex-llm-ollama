@@ -4,7 +4,7 @@ module Legion
   module Extensions
     module Llm
       module Ollama
-        VERSION = '0.1.7'
+        VERSION = '0.2.0'
       end
     end
   end
