@@ -37,7 +37,7 @@ module Legion
           end
 
           def api_base
-            resolve_base_url || 'http://localhost:11434'
+            resolve_base_url || normalize_url(settings[:base_url] || '127.0.0.1:11434')
           end
 
           def config_base_url
