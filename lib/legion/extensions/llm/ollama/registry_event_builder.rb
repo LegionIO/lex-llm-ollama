@@ -6,7 +6,7 @@ module Legion
       module Ollama
         # Builds sanitized lex-llm registry envelopes for Ollama provider state.
         class RegistryEventBuilder # rubocop:disable Metrics/ClassLength
-          include Legion::Logging::Helper
+          include Legion::Logging::Helper if defined?(Legion::Logging::Helper)
 
           def readiness(readiness)
             registry_event_class.public_send(
