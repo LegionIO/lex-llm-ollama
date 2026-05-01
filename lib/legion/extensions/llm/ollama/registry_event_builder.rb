@@ -6,6 +6,8 @@ module Legion
       module Ollama
         # Builds sanitized lex-llm registry envelopes for Ollama provider state.
         class RegistryEventBuilder # rubocop:disable Metrics/ClassLength
+          include Legion::Logging::Helper
+
           def readiness(readiness)
             registry_event_class.public_send(
               readiness[:ready] ? :available : :unavailable,
@@ -129,7 +131,8 @@ module Legion
             configured_node = (::Legion::Settings.dig(:node, :canonical_name) if defined?(::Legion::Settings))
             value = configured_node.to_s.strip
             value.empty? ? :ollama : value.to_sym
-          rescue StandardError
+          rescue StandardError => e
+            handle_exception(e, level: :debug, handled: true, operation: 'ollama.registry.provider_instance')
             :ollama
           end
 

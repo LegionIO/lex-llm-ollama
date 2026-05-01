@@ -12,6 +12,7 @@ module Legion
       # Ollama provider extension namespace.
       module Ollama
         extend ::Legion::Extensions::Core if ::Legion::Extensions.const_defined?(:Core, false)
+        extend Legion::Logging::Helper
 
         PROVIDER_FAMILY = :ollama
 

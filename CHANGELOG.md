@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.6 - 2026-04-30
+
+- Add `Legion::Logging::Helper` to Ollama module, RegistryPublisher, and RegistryEventBuilder.
+- Replace all bare rescue blocks with `handle_exception` calls including level, handled, and operation.
+- Add info-level action logging to Provider key actions: list_running_models, readiness, list_models, show_model, pull_model.
+- Add info-level logging to RegistryPublisher publish methods.
+- Add rescue-with-handle_exception to Provider#list_running_models, show_model, and pull_model.
+- Update README to reflect current architecture and file layout.
+
 ## 0.1.5 - 2026-04-28
 
 - Publish best-effort provider/model availability events to `llm.registry` from Ollama readiness and model discovery.

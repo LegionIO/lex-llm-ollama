@@ -47,27 +47,42 @@ module Legion
           def version_url = '/api/version'
 
           def list_running_models
+            log.info { "listing running models from #{api_base}#{running_models_url}" }
             connection.get(running_models_url).body.fetch('models', [])
+          rescue StandardError => e
+            handle_exception(e, level: :error, handled: true, operation: 'ollama.list_running_models')
+            []
           end
 
           def readiness(live: false)
+            log.info { "checking readiness live=#{live} at #{api_base}" }
             super.tap do |metadata|
               self.class.registry_publisher.publish_readiness_async(metadata) if live
             end
           end
 
           def list_models
+            log.info { "discovering models from #{api_base}#{models_url}" }
             super.tap do |models|
+              log.info { "discovered #{models.size} model(s) from Ollama" }
               self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
             end
           end
 
           def show_model(model)
+            log.info { "fetching model details for #{model}" }
             connection.post(show_model_url, { model: model }).body
+          rescue StandardError => e
+            handle_exception(e, level: :error, handled: true, operation: 'ollama.show_model')
+            raise
           end
 
           def pull_model(model, stream: false)
+            log.info { "pulling model #{model} stream=#{stream}" }
             connection.post(pull_url, { model: model, stream: stream }).body
+          rescue StandardError => e
+            handle_exception(e, level: :error, handled: true, operation: 'ollama.pull_model')
+            raise
           end
 
           private
