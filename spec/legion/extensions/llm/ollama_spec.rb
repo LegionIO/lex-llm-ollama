@@ -5,24 +5,26 @@ require 'spec_helper'
 RSpec.describe Legion::Extensions::Llm::Ollama do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
   let(:qwen_model) { Legion::Extensions::Llm::Model::Info.new(id: 'qwen3.6:27b', provider: :ollama) }
-  let(:registry_publisher) { instance_double(described_class::RegistryPublisher) }
+  let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
 
-  it 'exposes provider defaults with inherited fleet settings' do
-    settings = described_class.default_settings
-
-    expect(settings[:provider_family]).to eq(:ollama)
-    expect(settings[:fleet]).to include(:enabled)
-    expect(settings.dig(:instances, :default, :endpoint)).to eq('http://localhost:11434')
-    expect(settings.dig(:instances, :default, :usage, :embedding)).to be true
+  it 'exposes provider defaults with the full settings schema' do
+    expect(described_class.default_settings).to include(
+      enabled: false, base_url: '127.0.0.1:11434', default_model: 'qwen3.5:latest',
+      model_whitelist: [], model_blacklist: [], model_cache_ttl: 60,
+      tls: { enabled: false, verify: :peer }, instances: {}
+    )
   end
 
-  it 'registers the Legion::Extensions::Llm provider class' do
-    expect(Legion::Extensions::Llm::Provider.resolve(:ollama)).to eq(described_class::Provider)
+  it 'provides a registry_publisher backed by the shared base class' do
+    publisher = described_class.registry_publisher
+
+    expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
+    expect(publisher.provider_family).to eq(:ollama)
   end
 
   it 'exposes provider base endpoint helpers' do
     expect([provider.api_base, provider.completion_url, provider.models_url])
-      .to eq(['http://localhost:11434', '/api/chat', '/api/tags'])
+      .to eq(['http://127.0.0.1:11434', '/api/chat', '/api/tags'])
   end
 
   it 'exposes Ollama management endpoint helpers' do
@@ -93,6 +95,9 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       id: 'nomic-embed-text:latest',
       name: 'nomic-embed-text:latest',
       provider: :ollama,
+      family: 'nomic-bert',
+      capabilities: [:embedding],
+      modalities_output: [:embeddings],
       metadata: { 'details' => { 'family' => 'nomic-bert', 'parameter_size' => '137M' } }
     )
   end
@@ -110,7 +115,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
   end
 
   def capture_registry_events(models, readiness:)
-    publisher = described_class::RegistryPublisher.new
+    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :ollama)
     events = []
     allow(publisher).to receive(:publishing_available?).and_return(true)
     allow(publisher).to receive(:publish_event) { |event| events << event }

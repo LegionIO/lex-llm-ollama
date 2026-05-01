@@ -13,12 +13,11 @@ module Legion
 
             def slug = 'ollama'
             def local? = true
-            def configuration_options = %i[ollama_api_base ollama_keep_alive]
             def configuration_requirements = []
             def capabilities = Capabilities
 
             def registry_publisher
-              @registry_publisher ||= RegistryPublisher.new
+              @registry_publisher ||= Ollama.registry_publisher
             end
           end
 
@@ -33,8 +32,16 @@ module Legion
             def embeddings?(_model) = true
           end
 
+          def settings
+            Ollama.default_settings
+          end
+
           def api_base
-            config.ollama_api_base || 'http://localhost:11434'
+            resolve_base_url || 'http://localhost:11434'
+          end
+
+          def config_base_url
+            settings[:base_url]
           end
 
           def completion_url = '/api/chat'
@@ -87,13 +94,17 @@ module Legion
 
           private
 
+          def ollama_keep_alive
+            settings[:keep_alive]
+          end
+
           def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:) # rubocop:disable Metrics/ParameterLists
             {
               model: model.id,
               messages: format_messages(messages),
               stream: stream,
               think: thinking ? true : nil,
-              keep_alive: config.ollama_keep_alive,
+              keep_alive: ollama_keep_alive,
               format: schema_format(schema),
               options: { temperature: temperature }.compact,
               tools: format_tools(tools),
@@ -193,15 +204,34 @@ module Legion
 
           def parse_list_models_response(response, provider, _capabilities)
             response.body.fetch('models', []).map do |model|
+              family = model.dig('details', 'family')
+              caps = infer_capabilities(model.fetch('name'), family, Array(model['capabilities']))
+              output_mods = embedding_model?(model.fetch('name'), family) ? [:embeddings] : [:text]
+
               Legion::Extensions::Llm::Model::Info.new(
                 id: model.fetch('name'),
                 name: model.fetch('name'),
                 provider: provider,
-                created_at: model['modified_at'],
-                capabilities: Array(model['capabilities']),
-                metadata: model
+                family: family,
+                capabilities: caps,
+                modalities_output: output_mods,
+                metadata: model.merge('created_at' => model['modified_at'])
               )
             end
+          end
+
+          def infer_capabilities(name, family, api_caps)
+            return api_caps.map(&:to_sym) unless api_caps.empty?
+
+            if embedding_model?(name, family)
+              [:embedding]
+            else
+              %i[completion streaming tools vision]
+            end
+          end
+
+          def embedding_model?(name, family)
+            name.to_s.match?(/embed|embedding/i) || family.to_s.match?(/bert|nomic/i)
           end
 
           def render_embedding_payload(text, model:, dimensions:)

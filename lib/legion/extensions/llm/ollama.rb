@@ -1,9 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
-require 'legion/extensions/llm/ollama/registry_event_builder'
 require 'legion/extensions/llm/ollama/provider'
-require 'legion/extensions/llm/ollama/registry_publisher'
 require 'legion/extensions/llm/ollama/version'
 
 module Legion
@@ -17,25 +15,26 @@ module Legion
         PROVIDER_FAMILY = :ollama
 
         def self.default_settings
-          ::Legion::Extensions::Llm.provider_settings(
-            family: PROVIDER_FAMILY,
-            instance: {
-              endpoint: 'http://localhost:11434',
-              tier: :local,
-              transport: :http,
-              usage: { inference: true, embedding: true },
-              limits: { concurrency: 1 }
-            }
-          )
+          {
+            enabled: false,
+            base_url: '127.0.0.1:11434',
+            default_model: 'qwen3.5:latest',
+            model_whitelist: [],
+            model_blacklist: [],
+            model_cache_ttl: 60,
+            tls: { enabled: false, verify: :peer },
+            instances: {}
+          }
         end
 
         def self.provider_class
           Provider
         end
+
+        def self.registry_publisher
+          @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(provider_family: PROVIDER_FAMILY)
+        end
       end
     end
   end
 end
-
-Legion::Extensions::Llm::Provider.register(Legion::Extensions::Llm::Ollama::PROVIDER_FAMILY,
-                                           Legion::Extensions::Llm::Ollama::Provider)

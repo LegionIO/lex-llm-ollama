@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.7 - 2026-04-30
+
+- Provider contract overhaul: adopt lex-llm >= 0.1.9 base contract.
+- Replace `default_settings` with full schema (enabled, base_url, default_model, whitelist/blacklist, model_cache_ttl, tls, instances).
+- Remove `Provider.register` call; providers are now discovered via the extension registry.
+- Delete local `RegistryPublisher`, `RegistryEventBuilder`, and `Transport/` directory; use shared classes from lex-llm base.
+- Replace `config.ollama_api_base` with `resolve_base_url` multi-host resolution from the base provider contract.
+- Enrich `parse_list_models_response` to infer embedding capabilities and modalities from model name and family.
+- Add `settings` and `config_base_url` accessors to the provider for whitelist/blacklist and base URL resolution support.
+
 ## 0.1.6 - 2026-04-30
 
 - Add `Legion::Logging::Helper` to Ollama module, RegistryPublisher, and RegistryEventBuilder.
