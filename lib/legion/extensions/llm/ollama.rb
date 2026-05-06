@@ -81,5 +81,3 @@ module Legion
     end
   end
 end
-
-Legion::Extensions::Llm::Ollama.register_discovered_instances
