@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.2 - 2026-05-06
+
+- Add provider contract specs for the shared keyword-only `lex-llm` provider API.
+- Move Ollama defaults back to `Legion::Extensions::Llm.provider_settings` with instance-level fleet responder settings.
+- Serve non-live Ollama offering reads from cached live model discovery instead of probing the configured endpoint.
+- Add provider-owned fleet responder actor and runner backed by `legion-llm` fleet policy execution.
+- Bump the transport dependency floor to `legion-transport >= 1.4.14`.
+
+## 0.2.1 - 2026-05-03
+
+- Normalize configured Ollama instance endpoint aliases to `base_url`.
+- Use instance `base_url` config before provider defaults.
+
 ## 0.2.0 - 2026-05-01
 
 - Add auto-discovery via CredentialSources and AutoRegistration from lex-llm 0.3.0

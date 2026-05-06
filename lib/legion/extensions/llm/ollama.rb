@@ -16,16 +16,26 @@ module Legion
         PROVIDER_FAMILY = :ollama
 
         def self.default_settings
-          {
-            enabled: false,
-            base_url: '127.0.0.1:11434',
-            default_model: 'qwen3.5:latest',
-            model_whitelist: [],
-            model_blacklist: [],
-            model_cache_ttl: 60,
-            tls: { enabled: false, verify: :peer },
-            instances: {}
-          }
+          ::Legion::Extensions::Llm.provider_settings(
+            family: PROVIDER_FAMILY,
+            instance: {
+              endpoint: 'http://127.0.0.1:11434',
+              default_model: 'qwen3.5:latest',
+              tier: :local,
+              transport: :http,
+              credentials: {},
+              usage: { inference: true, embedding: true, image: false },
+              limits: { concurrency: 1 },
+              fleet: {
+                enabled: false,
+                respond_to_requests: false,
+                capabilities: %i[chat stream_chat embed],
+                lanes: [],
+                concurrency: 1,
+                queue_suffix: nil
+              }
+            }
+          )
         end
 
         def self.provider_class
@@ -50,7 +60,7 @@ module Legion
           configured = CredentialSources.setting(:extensions, :llm, :ollama, :instances)
           if configured.is_a?(Hash)
             configured.each do |name, config|
-              instances[name.to_sym] = config.merge(
+              instances[name.to_sym] = normalize_instance_config(config).merge(
                 tier: :direct,
                 capabilities: %i[completion embedding vision]
               )
@@ -58,6 +68,14 @@ module Legion
           end
 
           instances
+        end
+
+        def self.normalize_instance_config(config)
+          normalized = config.to_h.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
+          normalized[:base_url] ||= normalized.delete(:ollama_api_base)
+          normalized[:base_url] ||= normalized.delete(:api_base)
+          normalized[:base_url] ||= normalized.delete(:endpoint)
+          normalized.compact
         end
       end
     end

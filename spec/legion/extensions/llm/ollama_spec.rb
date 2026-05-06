@@ -7,12 +7,15 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
   let(:qwen_model) { Legion::Extensions::Llm::Model::Info.new(id: 'qwen3.6:27b', provider: :ollama) }
   let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
 
-  it 'exposes provider defaults with the full settings schema' do
-    expect(described_class.default_settings).to include(
-      enabled: false, base_url: '127.0.0.1:11434', default_model: 'qwen3.5:latest',
-      model_whitelist: [], model_blacklist: [], model_cache_ttl: 60,
-      tls: { enabled: false, verify: :peer }, instances: {}
-    )
+  it 'exposes provider defaults with the full settings schema' do # rubocop:disable RSpec/ExampleLength
+    settings = described_class.default_settings
+    instance = settings.dig(:instances, :default)
+
+    expect(settings).to include(enabled: true, provider_family: :ollama)
+    expect(instance).to include(endpoint: 'http://127.0.0.1:11434', default_model: 'qwen3.5:latest',
+                                tier: :local, transport: :http)
+    expect(instance).to include(fleet: hash_including(respond_to_requests: false),
+                                usage: hash_including(embedding: true))
   end
 
   it 'provides a registry_publisher backed by the shared base class' do
@@ -67,6 +70,21 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       .with(models, readiness: hash_including(provider: :ollama, live: false))
   end
 
+  it 'does not probe Ollama for uncached non-live offerings reads' do
+    allow(provider).to receive(:list_models).and_raise('unexpected live discovery')
+
+    expect(provider.discover_offerings).to eq([])
+    expect(provider).not_to have_received(:list_models)
+  end
+
+  it 'serves non-live offerings reads from the live discovery cache' do
+    stub_model_discovery
+    live_offerings = provider.discover_offerings(live: true)
+    allow(provider).to receive(:list_models).and_raise('unexpected live discovery')
+
+    expect(provider.discover_offerings.map(&:model)).to eq(live_offerings.map(&:model))
+  end
+
   it 'builds sanitized lex-llm registry events for Ollama model availability' do
     events = capture_registry_events([nomic_embed_model], readiness: { ready: true })
 
@@ -74,6 +92,30 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(events.first.to_h.dig(:offering, :provider_family)).to eq(:ollama)
     expect(events.first.to_h.dig(:offering, :usage_type)).to eq(:embedding)
     expect(events.first.to_h.dig(:offering, :model)).to eq('nomic-embed-text:latest')
+  end
+
+  describe '.discover_instances' do
+    before do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive_messages(socket_open?: false, setting: nil)
+    end
+
+    it 'normalizes configured instance endpoint aliases to base_url' do # rubocop:disable RSpec/ExampleLength
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :ollama, :instances)
+        .and_return({ lab: { endpoint: 'http://lab:11434' } })
+
+      expect(described_class.discover_instances[:lab]).to include(
+        base_url: 'http://lab:11434',
+        tier: :direct,
+        capabilities: %i[completion embedding vision]
+      )
+    end
+  end
+
+  it 'uses instance base_url config before provider defaults' do
+    configured = described_class::Provider.new(base_url: 'http://configured:11434')
+
+    expect(configured.api_base).to eq('http://configured:11434')
   end
 
   def chat_payload

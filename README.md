@@ -2,7 +2,7 @@
 
 LegionIO LLM provider extension for [Ollama](https://ollama.ai).
 
-This gem lives under `Legion::Extensions::Llm::Ollama` and depends on `lex-llm` (>= 0.1.9) for shared provider-neutral routing, fleet, transport, and registry primitives.
+This gem lives under `Legion::Extensions::Llm::Ollama` and depends on `lex-llm >= 0.4.0` for shared provider-neutral routing, response normalization, fleet envelopes, transport, and registry primitives.
 
 Load it with `require 'legion/extensions/llm/ollama'`.
 
@@ -53,6 +53,25 @@ Legion::Extensions::Llm.configure do |config|
   config.default_model = "qwen3.6:27b"
   config.default_embedding_model = "nomic-embed-text:latest"
 end
+```
+
+## Fleet Responder
+
+Provider instances can opt in to consuming Legion LLM fleet requests. The provider-owned fleet actor only starts when at least one configured instance enables `respond_to_requests`.
+
+```yaml
+extensions:
+  llm:
+    ollama:
+      instances:
+        local:
+          fleet:
+            enabled: true
+            respond_to_requests: true
+            capabilities:
+              - chat
+              - stream_chat
+              - embed
 ```
 
 ## Development
