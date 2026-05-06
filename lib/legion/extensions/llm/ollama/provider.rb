@@ -41,7 +41,7 @@ module Legion
           end
 
           def config_base_url
-            settings[:base_url]
+            config.respond_to?(:base_url) ? config.base_url : settings[:base_url]
           end
 
           def completion_url = '/api/chat'
@@ -92,7 +92,61 @@ module Legion
             raise
           end
 
+          def discover_offerings(live: false, **)
+            models = if live
+                       @cached_models = list_models
+                     else
+                       Array(@cached_models)
+                     end
+            models.map { |model_info| offering_from_model(model_info) }
+          rescue StandardError => e
+            handle_exception(e, level: :warn, handled: true, operation: 'ollama.discover_offerings')
+            []
+          end
+
           private
+
+          def offering_from_model(model_info)
+            Legion::Extensions::Llm::Routing::ModelOffering.new(
+              provider_family: :ollama,
+              instance_id: config.respond_to?(:instance_id) ? config.instance_id : :default,
+              transport: offering_transport,
+              tier: offering_tier,
+              model: model_info.id,
+              usage_type: offering_usage_type(model_info),
+              capabilities: offering_capabilities(model_info),
+              limits: offering_limits(model_info),
+              metadata: offering_metadata(model_info)
+            )
+          end
+
+          def offering_transport
+            config.respond_to?(:transport) ? config.transport : :http
+          end
+
+          def offering_tier
+            config.respond_to?(:tier) ? config.tier : :local
+          end
+
+          def offering_usage_type(model_info)
+            model_info.embedding? ? :embedding : :inference
+          end
+
+          def offering_capabilities(model_info)
+            model_info.capabilities.map(&:to_s)
+          end
+
+          def offering_limits(model_info)
+            { context_window: model_info.context_length }.compact
+          end
+
+          def offering_metadata(model_info)
+            {
+              context_length: model_info.context_length,
+              family: model_info.family,
+              size_bytes: model_info.size_bytes
+            }.compact
+          end
 
           def ollama_keep_alive
             settings[:keep_alive]
