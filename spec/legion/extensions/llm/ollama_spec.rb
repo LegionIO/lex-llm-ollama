@@ -85,6 +85,13 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(provider.discover_offerings.map(&:model)).to eq(live_offerings.map(&:model))
   end
 
+  it 'marks offerings discovery fallback exceptions as handled' do
+    stub_cached_offering_failure
+    expect(provider.discover_offerings).to eq([])
+    expect(provider).to have_received(:handle_exception)
+      .with(instance_of(RuntimeError), level: :warn, handled: true, operation: 'ollama.discover_offerings')
+  end
+
   it 'builds sanitized lex-llm registry events for Ollama model availability' do
     events = capture_registry_events([nomic_embed_model], readiness: { ready: true })
 
@@ -148,6 +155,13 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     allow(provider.connection).to receive(:get).with('/api/tags').and_return(
       fake_response({ 'models' => [{ 'name' => 'qwen3.6:27b', 'details' => { 'family' => 'qwen35' } }] })
     )
+  end
+
+  def stub_cached_offering_failure
+    stub_model_discovery
+    provider.discover_offerings(live: true)
+    allow(provider).to receive(:offering_from_model).and_raise('broken cached model')
+    allow(provider).to receive(:handle_exception)
   end
 
   def stub_registry_publisher

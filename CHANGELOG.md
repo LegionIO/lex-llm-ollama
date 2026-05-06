@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.5 - 2026-05-06
+
+- Mark cached offering discovery fallback exceptions as handled.
+- Refresh README provider contract, fleet responder, development gate, and license details.
+
 ## 0.2.4 - 2026-05-06
 
 - Use the shared `lex-llm` fleet provider responder helper for provider-owned fleet workers.
