@@ -85,6 +85,13 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(provider.discover_offerings.map(&:model)).to eq(live_offerings.map(&:model))
   end
 
+  it 'uses provider instance transport and tier in discovered offerings' do
+    configured = described_class::Provider.new(instance_id: :fleet_node, transport: :rabbitmq, tier: :fleet)
+    offering = configured.send(:offering_from_model, qwen_model)
+
+    expect(offering.to_h).to include(instance_id: :fleet_node, transport: :rabbitmq, tier: :fleet)
+  end
+
   it 'marks offerings discovery fallback exceptions as handled' do
     stub_cached_offering_failure
     expect(provider.discover_offerings).to eq([])

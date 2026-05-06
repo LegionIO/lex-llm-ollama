@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.6 - 2026-05-06
+
+- Load provider-owned fleet actors through the LegionIO subscription base and the canonical Ollama provider root.
+- Keep fleet runners anchored on the provider root namespace so provider constants and instance discovery are always loaded.
+- Preserve configured transport and tier metadata when Ollama builds routing offerings.
+- Gate release publishing on the shared security workflow.
+
 ## 0.2.5 - 2026-05-06
 
 - Mark cached offering discovery fallback exceptions as handled.

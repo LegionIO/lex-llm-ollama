@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm/fleet/provider_responder'
-require 'legion/extensions/llm/ollama/provider'
+require 'legion/extensions/llm/ollama'
 
 module Legion
   module Extensions
