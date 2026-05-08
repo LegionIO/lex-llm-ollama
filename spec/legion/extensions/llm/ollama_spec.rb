@@ -52,6 +52,13 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect([current.vectors, current.input_tokens, legacy.vectors]).to eq([[0.1, 0.2], 3, [0.3, 0.4]])
   end
 
+  it 'renders embedding payloads with model ids' do
+    embed_model = Legion::Extensions::Llm::Model::Info.new(id: 'nomic-embed-text:latest', provider: :ollama)
+    payload = provider.send(:render_embedding_payload, 'hello', model: embed_model, dimensions: nil)
+
+    expect(payload).to eq(model: 'nomic-embed-text:latest', input: 'hello')
+  end
+
   it 'publishes live readiness asynchronously through the registry publisher' do
     stub_registry_publisher
 

@@ -289,7 +289,7 @@ module Legion
           end
 
           def render_embedding_payload(text, model:, dimensions:)
-            { model: model, input: text, dimensions: dimensions }.compact
+            { model: model.respond_to?(:id) ? model.id : model, input: text, dimensions: dimensions }.compact
           end
 
           def parse_embedding_response(response, model:, text:)
