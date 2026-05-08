@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.7 - 2026-05-07
+
+- Render Ollama embedding payloads with the canonical model id when callers pass `Model::Info` objects.
+
 ## 0.2.6 - 2026-05-06
 
 - Load provider-owned fleet actors through the LegionIO subscription base and the canonical Ollama provider root.
