@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.9 - 2026-05-13
+
+- Add `fetch_model_detail` — calls POST `/api/show` to retrieve the real context window from Ollama.
+- Add `resolve_context_window` — tries live model detail cache first, falls back to static prefix map.
+- Add `extract_context_window` — parses `num_ctx` from `model_info` hash or `parameters` string in the `/api/show` response.
+- Add `CONTEXT_WINDOWS` static fallback map covering common Ollama model families.
+- Add `rescue Faraday::ConnectionFailed` in `discover_offerings` with a concise warn log instead of an unhandled exception.
+- Add `show_model_url` endpoint helper returning `/api/show`.
+
 ## 0.2.8 - 2026-05-12
 
 - Include `Legion::Logging::Helper` directly in Ollama provider, actor, and fleet runner runtime surfaces.

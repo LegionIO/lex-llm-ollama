@@ -87,6 +87,16 @@ module Legion
             raise
           end
 
+          def fetch_model_detail(model_name)
+            raw = show_model(model_name)
+            context_window = extract_context_window(raw)
+            { context_window: context_window }.compact
+          rescue StandardError => e
+            handle_exception(e, level: :warn, handled: true, operation: 'ollama.fetch_model_detail',
+                                model: model_name)
+            nil
+          end
+
           def pull_model(model, stream: false)
             log.debug { "ollama provider pulling model=#{model} stream=#{stream}" }
             log.info { "pulling model #{model} stream=#{stream}" }
@@ -100,20 +110,48 @@ module Legion
             log.debug do
               "ollama provider discovering offerings live=#{live} cached_model_count=#{Array(@cached_models).size}"
             end
-            models = if live
-                       @cached_models = list_models
-                     else
-                       Array(@cached_models)
-                     end
-            models.map { |model_info| offering_from_model(model_info) }.tap do |offerings|
+            resolve_models(live).map { |model_info| offering_from_model(model_info) }.tap do |offerings|
               log.debug { "ollama provider built offering_count=#{offerings.size} live=#{live}" }
             end
+          rescue Faraday::ConnectionFailed => e
+            log.warn("[ollama] instance=#{provider_instance_id} unreachable: #{e.message}")
+            []
           rescue StandardError => e
-            handle_exception(e, level: :warn, handled: true, operation: 'ollama.discover_offerings')
+            handle_exception(e, level: :warn, handled: true, operation: 'ollama.discover_offerings',
+                                backtrace_limit: 3)
             []
           end
 
+          CONTEXT_WINDOWS = {
+            'qwen3' => 128_000,
+            'qwen2.5' => 128_000,
+            'llama3' => 128_000,
+            'llama3.1' => 128_000,
+            'llama3.2' => 128_000,
+            'llama3.3' => 128_000,
+            'gemma2' => 8_192,
+            'gemma3' => 128_000,
+            'mistral' => 128_000,
+            'deepseek' => 128_000,
+            'phi3' => 128_000,
+            'phi4' => 16_384,
+            'command-r' => 128_000,
+            'codellama' => 16_384,
+            'nomic-embed' => 8_192,
+            'mxbai-embed' => 512,
+            'snowflake' => 512,
+            'bge' => 512
+          }.freeze
+
           private
+
+          def resolve_models(live)
+            if live
+              @cached_models = list_models
+            else
+              Array(@cached_models)
+            end
+          end
 
           def offering_from_model(model_info)
             Legion::Extensions::Llm::Routing::ModelOffering.new(
@@ -146,7 +184,46 @@ module Legion
           end
 
           def offering_limits(model_info)
-            { context_window: model_info.context_length }.compact
+            ctx = model_info.context_length || resolve_context_window(model_info.id)
+            ctx ? { context_window: ctx } : {}
+          end
+
+          def resolve_context_window(model_id)
+            detail = model_detail(model_id)
+            return detail[:context_window] if detail.is_a?(Hash) && detail[:context_window]
+
+            infer_context_window(model_id)
+          end
+
+          def infer_context_window(model_id)
+            name = model_id.to_s.split(':').first
+            CONTEXT_WINDOWS.find { |prefix, _| name.start_with?(prefix) }&.last
+          end
+
+          def extract_context_window(raw)
+            return nil unless raw.is_a?(Hash)
+
+            from_model_info(raw) || from_parameters_string(raw)
+          end
+
+          def from_model_info(raw)
+            model_info = raw['model_info'] || raw[:model_info]
+            return unless model_info.is_a?(Hash)
+
+            num_ctx_from_hash(model_info)&.to_i
+          end
+
+          def num_ctx_from_hash(model_info)
+            model_info['num_ctx'] || model_info[:num_ctx] ||
+              model_info.find { |k, _| k.to_s.end_with?('.context_length') }&.last
+          end
+
+          def from_parameters_string(raw)
+            params = raw['parameters'] || raw[:parameters]
+            return unless params.is_a?(String)
+
+            match = params.match(/num_ctx\s+(\d+)/)
+            match[1].to_i if match
           end
 
           def offering_metadata(model_info)
