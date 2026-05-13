@@ -12,6 +12,7 @@ end
 
 require 'legion/extensions/llm/ollama'
 require 'legion/extensions/llm/fleet/provider_responder'
+require 'legion/logging/helper'
 
 module Legion
   module Extensions
@@ -20,6 +21,8 @@ module Legion
         module Actor
           # Subscription actor for Ollama fleet request consumption.
           class FleetWorker < Legion::Extensions::Actors::Subscription
+            include Legion::Logging::Helper
+
             def runner_class
               'Legion::Extensions::Llm::Ollama::Runners::FleetWorker'
             end
@@ -33,7 +36,9 @@ module Legion
             end
 
             def enabled?
-              Legion::Extensions::Llm::Fleet::ProviderResponder.enabled_for?(Ollama.discover_instances)
+              enabled = Legion::Extensions::Llm::Fleet::ProviderResponder.enabled_for?(Ollama.discover_instances)
+              log.debug { "ollama fleet worker actor enabled=#{enabled}" }
+              enabled
             end
           end
         end

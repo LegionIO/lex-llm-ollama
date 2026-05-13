@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
+require 'legion/logging/helper'
 
 module Legion
   module Extensions
@@ -8,6 +9,8 @@ module Legion
       module Ollama
         # Ollama provider implementation for the Legion::Extensions::Llm base provider contract.
         class Provider < Legion::Extensions::Llm::Provider # rubocop:disable Metrics/ClassLength
+          include Legion::Logging::Helper
+
           class << self
             attr_writer :registry_publisher
 
@@ -54,7 +57,7 @@ module Legion
           def version_url = '/api/version'
 
           def list_running_models
-            log.info { "listing running models from #{api_base}#{running_models_url}" }
+            log.debug { "ollama provider listing running models endpoint=#{api_base}#{running_models_url}" }
             connection.get(running_models_url).body.fetch('models', [])
           rescue StandardError => e
             handle_exception(e, level: :error, handled: true, operation: 'ollama.list_running_models')
@@ -62,22 +65,22 @@ module Legion
           end
 
           def readiness(live: false)
-            log.info { "checking readiness live=#{live} at #{api_base}" }
+            log.debug { "ollama provider checking readiness live=#{live} endpoint=#{api_base}" }
             super.tap do |metadata|
               self.class.registry_publisher.publish_readiness_async(metadata) if live
             end
           end
 
           def list_models
-            log.info { "discovering models from #{api_base}#{models_url}" }
+            log.debug { "ollama provider discovering models endpoint=#{api_base}#{models_url}" }
             super.tap do |models|
-              log.info { "discovered #{models.size} model(s) from Ollama" }
+              log.debug { "ollama provider discovered model_count=#{models.size}" }
               self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
             end
           end
 
           def show_model(model)
-            log.info { "fetching model details for #{model}" }
+            log.debug { "ollama provider fetching model details model=#{model}" }
             connection.post(show_model_url, { model: model }).body
           rescue StandardError => e
             handle_exception(e, level: :error, handled: true, operation: 'ollama.show_model')
@@ -85,6 +88,7 @@ module Legion
           end
 
           def pull_model(model, stream: false)
+            log.debug { "ollama provider pulling model=#{model} stream=#{stream}" }
             log.info { "pulling model #{model} stream=#{stream}" }
             connection.post(pull_url, { model: model, stream: stream }).body
           rescue StandardError => e
@@ -93,12 +97,17 @@ module Legion
           end
 
           def discover_offerings(live: false, **)
+            log.debug do
+              "ollama provider discovering offerings live=#{live} cached_model_count=#{Array(@cached_models).size}"
+            end
             models = if live
                        @cached_models = list_models
                      else
                        Array(@cached_models)
                      end
-            models.map { |model_info| offering_from_model(model_info) }
+            models.map { |model_info| offering_from_model(model_info) }.tap do |offerings|
+              log.debug { "ollama provider built offering_count=#{offerings.size} live=#{live}" }
+            end
           rescue StandardError => e
             handle_exception(e, level: :warn, handled: true, operation: 'ollama.discover_offerings')
             []
@@ -153,8 +162,14 @@ module Legion
           end
 
           def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:) # rubocop:disable Metrics/ParameterLists
+            model_id = model.respond_to?(:id) ? model.id : model
+            log.debug do
+              "ollama provider rendering chat payload model=#{model_id} message_count=#{messages.size} " \
+                "stream=#{stream} tools=#{tools.size} schema=#{!schema.nil?} thinking=#{thinking ? true : false}"
+            end
+
             {
-              model: model.id,
+              model: model_id,
               messages: format_messages(messages),
               stream: stream,
               think: thinking ? true : nil,
@@ -195,6 +210,9 @@ module Legion
 
           def format_tools(tools)
             return nil if tools.empty?
+
+            tool_names = tools.values.filter_map { |tool| tool.respond_to?(:name) ? tool.name : nil }
+            log.debug { "ollama provider formatting tools count=#{tools.size} names=#{tool_names.join(',')}" }
 
             tools.values.map do |tool|
               {
@@ -243,6 +261,8 @@ module Legion
           def parse_tool_calls(tool_calls)
             return nil unless tool_calls
 
+            log.debug { "ollama provider parsing tool_call_count=#{tool_calls.size}" }
+
             tool_calls.to_h do |call|
               function = call.fetch('function', {})
               [
@@ -289,7 +309,11 @@ module Legion
           end
 
           def render_embedding_payload(text, model:, dimensions:)
-            { model: model.respond_to?(:id) ? model.id : model, input: text, dimensions: dimensions }.compact
+            model_id = model.respond_to?(:id) ? model.id : model
+            input_count = text.respond_to?(:size) ? text.size : 1
+            log.debug { "ollama provider rendering embedding payload model=#{model_id} input_count=#{input_count}" }
+
+            { model: model_id, input: text, dimensions: dimensions }.compact
           end
 
           def parse_embedding_response(response, model:, text:)
@@ -301,6 +325,9 @@ module Legion
                       else
                         body['embeddings']&.first
                       end
+
+            vector_count = vectors.respond_to?(:size) ? vectors.size : 0
+            log.debug { "ollama provider parsed embedding response model=#{model} vector_count=#{vector_count}" }
 
             Legion::Extensions::Llm::Embedding.new(vectors: vectors, model: model,
                                                    input_tokens: body['prompt_eval_count'].to_i)

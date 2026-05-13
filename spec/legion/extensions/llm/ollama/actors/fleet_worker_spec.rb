@@ -20,6 +20,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::FleetWorker do # rubocop:
   subject(:actor) { described_class.new }
 
   it 'uses the provider-owned fleet runner' do
+    expect(described_class.ancestors).to include(Legion::Logging::Helper)
     expect(actor.runner_class).to eq('Legion::Extensions::Llm::Ollama::Runners::FleetWorker')
     expect(actor.runner_function).to eq('handle_fleet_request')
     expect(actor.use_runner?).to be(false)

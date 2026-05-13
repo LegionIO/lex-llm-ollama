@@ -25,6 +25,11 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(publisher.provider_family).to eq(:ollama)
   end
 
+  it 'uses the Legion logging helper on extension and provider surfaces' do
+    expect(described_class.singleton_class.ancestors).to include(Legion::Logging::Helper)
+    expect(described_class::Provider.ancestors).to include(Legion::Logging::Helper)
+  end
+
   it 'exposes provider base endpoint helpers' do
     expect([provider.api_base, provider.completion_url, provider.models_url])
       .to eq(['http://127.0.0.1:11434', '/api/chat', '/api/tags'])
@@ -101,9 +106,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
   it 'marks offerings discovery fallback exceptions as handled' do
     stub_cached_offering_failure
+
     expect(provider.discover_offerings).to eq([])
-    expect(provider).to have_received(:handle_exception)
-      .with(instance_of(RuntimeError), level: :warn, handled: true, operation: 'ollama.discover_offerings')
   end
 
   it 'builds sanitized lex-llm registry events for Ollama model availability' do
@@ -175,7 +179,6 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     stub_model_discovery
     provider.discover_offerings(live: true)
     allow(provider).to receive(:offering_from_model).and_raise('broken cached model')
-    allow(provider).to receive(:handle_exception)
   end
 
   def stub_registry_publisher

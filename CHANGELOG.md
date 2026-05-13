@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.8 - 2026-05-12
+
+- Include `Legion::Logging::Helper` directly in Ollama provider, actor, and fleet runner runtime surfaces.
+- Add sanitized debug logging for provider discovery, payload rendering, tool formatting, embeddings, offerings, and fleet handoff.
+
 ## 0.2.7 - 2026-05-07
 
 - Render Ollama embedding payloads with the canonical model id when callers pass `Model::Info` objects.
