@@ -64,6 +64,19 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(payload).to eq(model: 'nomic-embed-text:latest', input: 'hello')
   end
 
+  it 'does not assume GGUF chat models support tools without Ollama capability metadata' do
+    models = parse_models('models' => [{ 'name' => 'hf.co/unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL' }])
+
+    expect(models.first.capabilities).to include(:completion, :streaming)
+    expect(models.first.capabilities).not_to include(:tools)
+  end
+
+  it 'advertises tools only when Ollama reports tools capability metadata' do
+    models = parse_models('models' => [{ 'name' => 'qwen-tools', 'capabilities' => %w[completion tools] }])
+
+    expect(models.first.capabilities).to include(:completion, :streaming, :tools)
+  end
+
   it 'publishes live readiness asynchronously through the registry publisher' do
     stub_registry_publisher
 
@@ -155,6 +168,10 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
   def fake_response(body)
     Struct.new(:body).new(body)
+  end
+
+  def parse_models(body)
+    provider.send(:parse_list_models_response, fake_response(body), :ollama, nil)
   end
 
   def nomic_embed_model

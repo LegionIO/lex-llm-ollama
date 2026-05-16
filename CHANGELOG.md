@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.10 - 2026-05-16
+
+- Stop assuming every non-embedding Ollama model supports tools; fallback chat discovery now advertises completion, streaming, and vision only.
+- Add canonical Ollama capability normalization so reported `tools`/function-calling metadata is preserved and streaming is inferred for chat/completion models.
+- Include reported capability metadata from `/api/show` model detail responses.
+
 ## 0.2.9 - 2026-05-13
 
 - Add `fetch_model_detail` — calls POST `/api/show` to retrieve the real context window from Ollama.
