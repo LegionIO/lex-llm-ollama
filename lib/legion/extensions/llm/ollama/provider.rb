@@ -90,7 +90,7 @@ module Legion
           def fetch_model_detail(model_name)
             raw = show_model(model_name)
             context_window = extract_context_window(raw)
-            { context_window: context_window }.compact
+            { context_window: context_window, capabilities: extract_capabilities(raw) }.compact
           rescue StandardError => e
             handle_exception(e, level: :warn, handled: true, operation: 'ollama.fetch_model_detail',
                                 model: model_name)
@@ -372,13 +372,33 @@ module Legion
           end
 
           def infer_capabilities(name, family, api_caps)
-            return api_caps.map(&:to_sym) unless api_caps.empty?
+            normalized = normalize_ollama_capabilities(api_caps)
+            return normalized unless normalized.empty?
 
             if embedding_model?(name, family)
               [:embedding]
             else
-              %i[completion streaming tools vision]
+              %i[completion streaming vision]
             end
+          end
+
+          def normalize_ollama_capabilities(capabilities)
+            Array(capabilities).compact.each_with_object([]) do |capability, result|
+              capability_sym = capability.to_s.downcase.strip.to_sym
+              next if capability_sym.to_s.empty?
+
+              result << capability_sym
+              result << :tools if %i[function_calling functions tool tool_use].include?(capability_sym)
+              result << :streaming if %i[chat completion].include?(capability_sym)
+            end.uniq
+          end
+
+          def extract_capabilities(raw)
+            return nil unless raw.is_a?(Hash)
+
+            caps = raw['capabilities'] || raw[:capabilities]
+            normalized = normalize_ollama_capabilities(caps)
+            normalized unless normalized.empty?
           end
 
           def embedding_model?(name, family)
