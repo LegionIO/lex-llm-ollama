@@ -249,13 +249,84 @@ module Legion
               model: model_id,
               messages: format_messages(messages),
               stream: stream,
-              think: thinking ? true : nil,
+              think: thinking == true,
               keep_alive: ollama_keep_alive,
               format: schema_format(schema),
               options: { temperature: temperature }.compact,
               tools: format_tools(tools),
               tool_choice: tool_choice(tool_prefs)
             }.compact
+          end
+
+          def stream_response(connection, payload, additional_headers = {}, &block)
+            buffer = +''
+            chunks = []
+
+            connection.post(stream_url, payload) do |req|
+              req.headers = additional_headers.merge(req.headers) unless additional_headers.empty?
+              req.options.on_data = ndjson_handler(buffer, chunks, block)
+            end
+
+            finalize_stream(chunks)
+          end
+
+          def ndjson_handler(buffer, chunks, block)
+            proc do |chunk_data, _bytes, env|
+              next if env.respond_to?(:status) && env.status && env.status != 200
+
+              buffer << chunk_data.to_s
+              drain_ndjson_buffer(buffer, chunks, block)
+            end
+          end
+
+          def drain_ndjson_buffer(buffer, chunks, block)
+            while (idx = buffer.index("\n"))
+              line = buffer.slice!(0..idx).strip
+              next if line.empty?
+
+              parse_ndjson_line(line, chunks, block)
+            end
+          end
+
+          def parse_ndjson_line(line, chunks, block)
+            parsed = Legion::JSON.parse(line, symbolize_names: false)
+            return unless parsed.is_a?(Hash)
+
+            built = build_chunk(parsed)
+            chunks << built
+            block&.call(built)
+          rescue Legion::JSON::ParseError => e
+            handle_exception(e, level: :debug, handled: true, operation: 'ollama.stream_parse')
+          end
+
+          def finalize_stream(chunks)
+            return Legion::Extensions::Llm::Message.new(role: :assistant, content: nil) if chunks.empty?
+
+            Legion::Extensions::Llm::Message.new(
+              role: :assistant,
+              content: join_stream_content(chunks),
+              thinking: join_stream_thinking(chunks),
+              tool_calls: merge_stream_tool_calls(chunks),
+              model_id: chunks.last.model_id,
+              input_tokens: chunks.last.input_tokens,
+              output_tokens: chunks.last.output_tokens,
+              raw: chunks.last.raw
+            )
+          end
+
+          def join_stream_content(chunks)
+            text = chunks.filter_map { |c| c.content&.to_s }.join
+            text.empty? ? nil : text
+          end
+
+          def join_stream_thinking(chunks)
+            parts = chunks.filter_map { |c| c.thinking&.text }
+            Thinking.build(text: parts.empty? ? nil : parts.join)
+          end
+
+          def merge_stream_tool_calls(chunks)
+            merged = chunks.filter_map(&:tool_calls).reject(&:empty?).reduce({}, :merge)
+            merged.empty? ? nil : merged
           end
 
           def format_messages(messages)
@@ -312,11 +383,13 @@ module Legion
           def parse_completion_response(response)
             body = response.body
             message = body.fetch('message', {})
+            content, thinking = extract_thinking_from_completion(message)
             Legion::Extensions::Llm::Message.new(
               role: :assistant,
-              content: message['content'],
+              content: content,
               model_id: body['model'],
               tool_calls: parse_tool_calls(message['tool_calls']),
+              thinking: thinking,
               input_tokens: body['prompt_eval_count'],
               output_tokens: body['eval_count'],
               raw: body
@@ -325,14 +398,33 @@ module Legion
 
           def build_chunk(data)
             message = data.fetch('message', {})
+            thinking = message['thinking']
             Legion::Extensions::Llm::Chunk.new(
               role: :assistant,
               content: message['content'],
+              thinking: thinking ? Thinking.build(text: thinking) : nil,
+              tool_calls: parse_tool_calls(message['tool_calls']),
               model_id: data['model'],
               input_tokens: data['prompt_eval_count'],
               output_tokens: data['eval_count'],
               raw: data
             )
+          end
+
+          def extract_thinking_from_completion(message)
+            extraction = Responses::ThinkingExtractor.extract(
+              message['content'],
+              metadata: thinking_metadata(message)
+            )
+
+            [
+              extraction.content,
+              Thinking.build(text: extraction.thinking, signature: extraction.signature)
+            ]
+          end
+
+          def thinking_metadata(message)
+            { thinking: message['thinking'] }.compact
           end
 
           def parse_tool_calls(tool_calls)
