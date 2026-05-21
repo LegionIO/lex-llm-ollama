@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.12 - 2026-05-21
+
+- Add `default_transport`/`default_tier` class declarations, remove duplicate instance methods
+- Add `model_allowed?` filtering in `discover_offerings`
+- Add `DiscoveryRefresh` actor (Every, 30min, run_now) for non-blocking model discovery
+- Identity headers included via base provider
+- api_base reads from settings[:endpoint] fallback
+
+
 ## 0.2.10 - 2026-05-16
 
 - Stop assuming every non-embedding Ollama model supports tools; fallback chat discovery now advertises completion, streaming, and vision only.

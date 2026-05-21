@@ -16,6 +16,8 @@ module Legion
 
             def slug = 'ollama'
             def local? = true
+            def default_transport = :http
+            def default_tier = :local
             def configuration_requirements = []
             def capabilities = Capabilities
 
@@ -40,7 +42,7 @@ module Legion
           end
 
           def api_base
-            resolve_base_url || normalize_url(settings[:base_url] || '127.0.0.1:11434')
+            resolve_base_url || normalize_url(settings[:base_url] || settings[:endpoint] || 'http://127.0.0.1:11434')
           end
 
           def config_base_url
@@ -110,7 +112,11 @@ module Legion
             log.debug do
               "ollama provider discovering offerings live=#{live} cached_model_count=#{Array(@cached_models).size}"
             end
-            resolve_models(live).map { |model_info| offering_from_model(model_info) }.tap do |offerings|
+            resolve_models(live).filter_map do |model_info|
+              next unless model_allowed?(model_info.id)
+
+              offering_from_model(model_info)
+            end.tap do |offerings|
               log.debug { "ollama provider built offering_count=#{offerings.size} live=#{live}" }
             end
           rescue Faraday::ConnectionFailed => e
@@ -165,14 +171,6 @@ module Legion
               limits: offering_limits(model_info),
               metadata: offering_metadata(model_info)
             )
-          end
-
-          def offering_transport
-            config.respond_to?(:transport) ? config.transport : :http
-          end
-
-          def offering_tier
-            config.respond_to?(:tier) ? config.tier : :local
           end
 
           def offering_usage_type(model_info)
