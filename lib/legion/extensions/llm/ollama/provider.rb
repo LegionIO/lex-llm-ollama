@@ -236,7 +236,7 @@ module Legion
             settings[:keep_alive]
           end
 
-          def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:) # rubocop:disable Metrics/ParameterLists
+          def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:)
             model_id = model.respond_to?(:id) ? model.id : model
             log.debug do
               "ollama provider rendering chat payload model=#{model_id} message_count=#{messages.size} " \
