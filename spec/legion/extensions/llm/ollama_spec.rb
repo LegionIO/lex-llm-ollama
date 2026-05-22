@@ -7,7 +7,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
   let(:qwen_model) { Legion::Extensions::Llm::Model::Info.new(id: 'qwen3.6:27b', provider: :ollama) }
   let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
 
-  it 'exposes provider defaults with the full settings schema' do # rubocop:disable RSpec/ExampleLength
+  it 'exposes provider defaults with the full settings schema' do
     settings = described_class.default_settings
     instance = settings.dig(:instances, :default)
 
@@ -137,7 +137,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       allow(Legion::Extensions::Llm::CredentialSources).to receive_messages(socket_open?: false, setting: nil)
     end
 
-    it 'normalizes configured instance endpoint aliases to base_url' do # rubocop:disable RSpec/ExampleLength
+    it 'normalizes configured instance endpoint aliases to base_url' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :ollama, :instances)
         .and_return({ lab: { endpoint: 'http://lab:11434' } })

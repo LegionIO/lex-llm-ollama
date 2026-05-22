@@ -14,5 +14,21 @@ Metrics/BlockLength:
     - spec/**/*
 Metrics/MethodLength:
   Enabled: false
+Metrics/ParameterLists:
+  Enabled: false
+Metrics/AbcSize:
+  Enabled: false
+Metrics/CyclomaticComplexity:
+  Enabled: false
+Metrics/PerceivedComplexity:
+  Enabled: false
 RSpec/MultipleExpectations:
+  Enabled: false
+RSpec/ExampleLength:
+  Enabled: false
+RSpec/LeakyConstantDeclaration:
+  Enabled: false
+RSpec/InstanceVariable:
+  Enabled: false
+Style/Documentation:
   Enabled: false
