@@ -112,13 +112,13 @@ module Legion
             log.debug do
               "ollama provider discovering offerings live=#{live} cached_model_count=#{Array(@cached_models).size}"
             end
-            resolve_models(live).filter_map do |model_info|
+            offerings = resolve_models(live).filter_map do |model_info|
               next unless model_allowed?(model_info.id)
 
               offering_from_model(model_info)
-            end.tap do |offerings|
-              log.debug { "ollama provider built offering_count=#{offerings.size} live=#{live}" }
             end
+            log.debug { "ollama provider built offering_count=#{offerings.size} live=#{live}" }
+            offerings
           rescue Faraday::ConnectionFailed => e
             log.warn("[ollama] instance=#{provider_instance_id} unreachable: #{e.message}")
             []
