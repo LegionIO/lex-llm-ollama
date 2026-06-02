@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.13 - 2026-06-02
+
+- **Scope discovery refresh to Ollama only** — `DiscoveryRefresh#manual` now calls `Discovery.refresh_discovered_models!(provider: :ollama)` instead of `Discovery.run`, which previously triggered model discovery for all registered providers (anthropic, bedrock, etc.) and caused cross-provider coupling
+
 ## 0.2.12 - 2026-05-21
 
 - Add `default_transport`/`default_tier` class declarations, remove duplicate instance methods
