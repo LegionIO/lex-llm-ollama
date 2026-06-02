@@ -35,7 +35,7 @@ module Legion
               log.debug('[ollama][discovery_refresh] refreshing model list')
               return unless defined?(Legion::LLM::Discovery)
 
-              Legion::LLM::Discovery.run
+              Legion::LLM::Discovery.refresh_discovered_models!(provider: :ollama)
               if defined?(Legion::LLM::Router) && Legion::LLM::Router.respond_to?(:populate_auto_rules)
                 Legion::LLM::Router.populate_auto_rules(Legion::LLM::Discovery.discovered_instances)
               end
