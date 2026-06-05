@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.14 - 2026-06-05
+
+- Verified specs and RuboCop compliance (52 examples, 0 failures; 15 files, 0 offenses)
+- Updated README with comprehensive extension index covering architecture, classes, configuration, and usage
+
 ## 0.2.13 - 2026-06-02
 
 - **Scope discovery refresh to Ollama only** — `DiscoveryRefresh#manual` now calls `Discovery.refresh_discovered_models!(provider: :ollama)` instead of `Discovery.run`, which previously triggered model discovery for all registered providers (anthropic, bedrock, etc.) and caused cross-provider coupling
