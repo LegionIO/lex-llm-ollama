@@ -2,6 +2,7 @@
 
 require 'bundler/setup'
 require 'legion/logging'
+require 'legion/extensions/llm'
 require 'legion/extensions/llm/ollama'
 
 Legion::Logging.instance_variable_set(
