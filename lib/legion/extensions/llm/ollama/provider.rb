@@ -8,7 +8,7 @@ module Legion
     module Llm
       module Ollama
         # Ollama provider implementation for the Legion::Extensions::Llm base provider contract.
-        class Provider < Legion::Extensions::Llm::Provider # rubocop:disable Metrics/ClassLength
+        class Provider < Legion::Extensions::Llm::Provider
           include Legion::Logging::Helper
 
           class << self

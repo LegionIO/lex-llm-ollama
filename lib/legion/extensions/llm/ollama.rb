@@ -2,6 +2,7 @@
 
 require 'legion/extensions/llm'
 require 'legion/extensions/llm/ollama/provider'
+require 'legion/extensions/llm/ollama/translator'
 require 'legion/extensions/llm/ollama/version'
 require 'legion/logging/helper'
 
