@@ -1,425 +1,495 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm/canonical'
-require 'legion/logging/helper'
+require 'legion/extensions/llm/responses/thinking_extractor'
+require 'legion/json'
+require 'legion/logging'
 
 module Legion
   module Extensions
     module Llm
       module Ollama
+        # Canonical provider translator for Ollama (/api/chat NDJSON wire format).
+        #
+        # Implements render_request, parse_response, parse_chunk, and capabilities.
+        # Ollama uses NDJSON streaming (not SSE), native tool calling, and the `think`
+        # flag for extended thinking support.
+        #
+        # Ollama quirks (declared in capabilities):
+        # - tool_calls_as_text: false — Ollama returns structured tool_calls natively.
+        # - forced_tool_choice: false — Ollama does not support forced tool selection.
+        # - assistant_prefill: false — Ollama does not support assistant prefill.
         class Translator
           include Legion::Logging::Helper
 
-          OPEN_TAG =
-            CLOSE_TAG =
+          # Ollama-specific stop_reason mapping (done_reason field).
+          OLLAMA_STOP_REASON_MAP = {
+            'stop' => :end_turn,
+            'tool_use' => :tool_use,
+            'length' => :max_tokens
+          }.freeze
+          FALLBACK_STOP_REASON = :end_turn
 
-              SUPPORTED_PARAMS = [
-                [:max_tokens, :num_predict, 'max_tokens->num_predict'],
-                [:temperature, :temperature, 'temperature'],
-                [:top_p, :top_p, 'top_p'],
-                [:top_k, :top_k, 'top_k'],
-                [:seed, :seed, 'seed']
-              ].freeze
+          # G18 parameter mapping: canonical params -> Ollama options keys.
+          PARAM_OPTIONS_KEYS = {
+            max_tokens: :num_predict,
+            temperature: :temperature,
+            top_p: :top_p,
+            top_k: :top_k,
+            stop_sequences: :stop,
+            seed: :seed,
+            frequency_penalty: :frequency_penalty,
+            presence_penalty: :presence_penalty
+          }.freeze
 
-          UNSUPPORTED_PARAMS = %i[max_thinking_tokens frequency_penalty presence_penalty].freeze
+          SUPPORTED_PARAMS = %i[
+            max_tokens temperature top_p top_k stop_sequences
+            seed frequency_penalty presence_penalty
+          ].freeze
 
-          class << self
-            attr_writer :keep_alive, :strict_params
-
-            def keep_alive
-              @keep_alive || Ollama.default_settings.dig(:instances, :default, :keep_alive) || '5m'
-            end
-
-            def strict_params
-              @strict_params.nil? ? false : @strict_params
-            end
+          def initialize(config: nil)
+            @config = config
           end
 
+          # Render a canonical request into Ollama /api/chat wire payload.
           def render_request(request)
-            log.debug('[ollama][translator] rendering canonical request to Ollama wire format')
-
-            model_id = resolve_model(request)
-            messages = render_messages(request.messages)
-            options = render_options(request)
-            tools = render_tools(request.tools)
-            tool_choice = render_tool_choice(request.tool_choice)
-            format_value = render_response_format(request.params)
-            think_flag = request.thinking&.enabled? || (request.params&.max_thinking_tokens && true)
-
+            model = request.metadata&.dig(:model) || 'default'
+            messages = format_messages(request)
             payload = {
-              model: model_id,
+              model: model,
               messages: messages,
-              stream: request.stream,
-              think: think_flag,
-              keep_alive: self.class.keep_alive,
-              format: format_value,
-              options: options,
-              tools: tools,
-              tool_choice: tool_choice
-            }.compact
+              stream: request.stream
+            }
 
-            messages.unshift({ role: 'system', content: request.system }) if request.system
-            payload
+            payload[:tools] = format_tools(request.tools) unless request.tools.to_h.empty?
+            apply_options(payload, request.params)
+            apply_thinking_config(payload, request)
+            apply_response_format(payload, request.params)
+
+            log.debug do
+              "[llm][ollama-translator] action=render_request model=#{model} stream=#{request.stream} " \
+                "message_count=#{messages.size} tools=#{request.tools&.size || 0}"
+            end
+
+            payload.compact
           end
 
+          # Parse an Ollama /api/chat completion response into a Canonical::Response.
           def parse_response(wire)
-            wire_h = symbolize_hash(wire)
+            return canonical_error_response(wire) unless wire.is_a?(Hash)
+            return Canonical::Response.from_hash(wire) if canonical_response?(wire)
 
-            return Canonical::Response.from_hash(wire_h) if wire_h.key?(:text) || wire_h.key?(:stop_reason)
+            message = wire[:message] || wire['message'] || {}
+            content = message[:content] || message['content'] || ''
+            tool_calls_raw = message[:tool_calls] || message['tool_calls']
+            model = wire[:model] || wire['model']
+            done_reason = wire[:done_reason] || wire['done_reason']
+            done = wire[:done] || wire['done']
 
-            model = wire_h[:model]
-            message_data = wire_h[:message] || {}
-            usage = parse_usage_from_hash(wire_h)
-            content = raw_access(message_data, 'content') || ''
-            tool_calls = parse_tool_calls(message_data)
-            thinking_meta = raw_access(message_data, 'thinking')
-            extracted = extract_thinking_from_content(content.to_s)
-            thinking_content = thinking_meta || extracted[:thinking]
-            thinking = canonical_thinking(thinking_content)
-            text = extracted[:content] || ''
-            stop_reason = parse_stop_reason(wire_h)
+            extraction = Responses::ThinkingExtractor.extract(
+              content,
+              metadata: thinking_metadata(message)
+            )
+
+            text = extraction.content || ''
+            thinking = build_canonical_thinking(extraction)
+            tool_calls = parse_tool_calls(tool_calls_raw)
+            stop_reason = map_stop_reason(done_reason, done)
+
+            usage = Canonical::Usage.from_hash({
+                                                 input_tokens: wire[:prompt_eval_count] || wire['prompt_eval_count'],
+                                                 output_tokens: wire[:eval_count] || wire['eval_count']
+                                               })
 
             Canonical::Response.build(
-              text: text,
+              text: text.to_s,
               thinking: thinking,
               tool_calls: tool_calls,
               usage: usage,
               stop_reason: stop_reason,
-              model: model.to_s,
-              routing: {},
-              metadata: wire_h[:metadata] || {}
+              model: model,
+              metadata: {}
             )
+          rescue StandardError => e
+            handle_exception(e, level: :error, handled: false, operation: 'ollama.translator.parse_response')
+            raise
           end
 
+          # Parse a single NDJSON chunk into a Canonical::Chunk or nil.
           def parse_chunk(raw)
-            return nil if raw.nil? || (raw.is_a?(String) && raw.empty?)
+            return nil if raw.nil?
 
-            chunk = raw.is_a?(Hash) ? raw : {}
+            data = normalize_chunk_input(raw)
+            return nil if data.nil?
 
-            if chunk.key?('type') && chunk.key?('request_id')
-              chunk_sym = symbolize_hash(chunk)
-              return Canonical::Chunk.from_hash(chunk_sym)
-            end
-            return Canonical::Chunk.from_hash(chunk) if chunk.key?(:type) && chunk.key?(:request_id)
+            # Handle canonical-form chunks (from conformance fixtures)
+            return handle_canonical_chunk(data) if data['type'] || data[:type]
 
-            done = done?(chunk)
-            return final_chunk(chunk) if done
-
-            message_data = chunk[:message] || chunk['message'] || {}
-            index = chunk[:index] || chunk['index'] || 0
-            request_id = chunk[:request_id] || chunk['request_id']
-            content = raw_access(message_data, 'content')
-
-            if content && !content.empty?
-              extracted = extract_thinking_from_content(content)
-              return Canonical::Chunk.text_delta(delta: extracted[:content], request_id: request_id, index: index)
-            end
-
-            thinking_text = raw_access(message_data, 'thinking')
-            if thinking_text && !thinking_text.empty?
-              return Canonical::Chunk.thinking_delta(
-                delta: thinking_text,
-                request_id: request_id,
-                index: index,
-                signature: nil
-              )
-            end
-
-            tool_call_delta(chunk, request_id, index)
+            parse_ollama_chunk(data)
+          rescue StandardError => e
+            handle_exception(e, level: :error, handled: false, operation: 'ollama.translator.parse_chunk')
+            raise
           end
 
+          # Declared capabilities for the Ollama provider.
           def capabilities
             {
               provider: 'ollama',
               streaming: true,
-              thinking: true,
               tool_calls: true,
-              api_chat_field_mapping: true,
-              thinking_via_think_flag: true,
-              thinking_dual_source: true,
-              options_subhash: true,
-              response_format_json_schema: true,
-              thinking_tags: OPEN_TAG,
-              param_mappings: {
-                max_tokens: 'num_predict',
-                temperature: 'temperature',
-                top_p: 'top_p',
-                top_k: 'top_k',
-                stop_sequences: 'stop',
-                seed: 'seed',
-                response_format: 'format'
-              }.freeze
+              thinking: true,
+              vision: true,
+              embeddings: true,
+              tool_calls_as_text: false,
+              forced_tool_choice: false,
+              assistant_prefill: false
             }.freeze
           end
 
           private
 
-          def resolve_model(request)
-            id = request.metadata&.dig(:resolved_model)&.to_s
-            return id if id
+          attr_reader :config
 
-            id = request.metadata&.dig(:model)&.to_s
-            return id if id
+          # -- Message formatting --
 
-            default_settings[:default_model]&.to_s || 'qwen3.5:latest'
+          def format_messages(request)
+            messages = format_request_messages(request.messages)
+
+            if request.system.to_s.strip.empty?
+              messages
+            else
+              [{ role: 'system', content: request.system.strip }] + messages
+            end
           end
 
-          def render_messages(messages)
-            return [] unless messages
+          def format_request_messages(messages)
+            return [] if messages.nil? || messages.empty?
 
-            messages.map do |msg|
-              { role: msg.role.to_s, content: render_content(msg) }.tap do |payload|
-                payload[:tool_call_id] = msg.tool_call_id if msg.tool_call_id
+            messages.map { |msg| format_message(msg) }
+          end
+
+          def format_message(msg)
+            role = msg.role.to_s
+            content = format_message_content(msg)
+            result = { role: role, content: content }
+
+            images = extract_images(msg.content)
+            result[:images] = images unless images.empty?
+
+            result[:tool_call_id] = msg.tool_call_id if msg.tool_call_id
+            result.compact
+          end
+
+          def format_message_content(msg)
+            content = msg.content
+            return content if content.is_a?(String)
+
+            case content
+            when Array
+              extract_text_from_blocks(content)
+            when Canonical::ContentBlock
+              content.text? ? content.text.to_s : content.to_s
+            else
+              content.to_s
+            end
+          end
+
+          def extract_text_from_blocks(blocks)
+            parts = blocks.filter_map do |block|
+              case block
+              when Canonical::ContentBlock
+                format_content_block_text(block)
+              when Hash
+                block_hash = block.transform_keys(&:to_sym)
+                block_hash[:text]&.to_s
+              else
+                block.to_s
               end
             end
+            parts.join
           end
 
-          def render_content(message)
-            case message
-            when Canonical::Message then message_text(message)
-            else message.respond_to?(:text) ? message.text.to_s : message.to_s
+          def format_content_block_text(block)
+            case block.type
+            when :text, :thinking
+              block.text.to_s
+            when :tool_use
+              Legion::JSON.dump({ name: block.name, arguments: block.input || {} })
+            when :tool_result
+              block.text.to_s
             end
           end
 
-          def message_text(message)
-            case message.content
-            when String then message.content
-            when Array then text_from_array(message.content)
-            else message.content.to_s
+          def extract_images(content)
+            return [] unless content.is_a?(Array)
+
+            content.filter_map do |block|
+              next unless block.is_a?(Canonical::ContentBlock) && block.type == :image
+
+              block.data
             end
           end
 
-          def text_from_array(arry)
-            arry.filter_map do |block|
-              next block.text if block.is_a?(Canonical::ContentBlock) && block.text?
-              next unless block.is_a?(Hash)
+          # -- Tool formatting --
 
-              type = block[:type] || block['type']
-              block[:text] || block['text'] if %w[text tool_result].include?(type)
-            end.join
-          end
+          def format_tools(tools)
+            return nil if tools.to_h.empty?
 
-          def render_params_for_options(params)
-            return {} unless params.is_a?(Canonical::Params)
+            tools.to_h.values.map do |tool|
+              tool_hash = if tool.is_a?(Canonical::ToolDefinition)
+                            { name: tool.name, description: tool.description, parameters: tool.parameters }
+                          elsif tool.is_a?(Hash)
+                            tool.transform_keys(&:to_sym)
+                          else
+                            tool
+                          end
 
-            mapped = {}
-            supported = []
-            dropped = []
+              name = tool_hash[:name] || tool_hash['name']
+              description = (tool_hash[:description] || tool_hash['description'] || '').to_s
+              parameters = tool_hash[:parameters] || tool_hash[:input_schema] ||
+                           { type: 'object', properties: {} }
+              parameters = parameters.to_h if parameters.respond_to?(:to_h) && !parameters.is_a?(Hash)
+              parameters = { type: 'object', properties: {} } unless parameters.is_a?(Hash)
 
-            SUPPORTED_PARAMS.each do |param_sym, mapped_key, label|
-              val = params.public_send(param_sym)
-              next unless val
-
-              mapped[mapped_key] = val
-              supported << label
-            end
-
-            stop_seqs = params.stop_sequences
-            if stop_seqs
-              mapped[:stop] = Array(stop_seqs)
-              supported << 'stop_sequences->stop'
-            end
-
-            UNSUPPORTED_PARAMS.each do |param_sym|
-              val = params.public_send(param_sym)
-              next unless val
-
-              dropped << param_sym.to_s
-              handle_dropped_param(param_sym.to_s)
-            end
-
-            log.debug("[ollama][translator] params mapped: #{supported.join(', ')}") if supported.any?
-            log.debug("[ollama][translator] params dropped (unsupported): #{dropped.join(', ')}") if dropped.any?
-
-            mapped
-          end
-
-          def render_options(request)
-            return {} unless request.params
-
-            render_params_for_options(request.params)
-          end
-
-          def render_tools(tools)
-            return nil unless tools && !tools.empty?
-
-            tools.values.filter_map { |t| t.respond_to?(:name) ? t.name : nil }
-            log.debug('[ollama][translator] formatting tools count=#{tools.size} names=#{names.join(', ')}))
-            tools.values.map { |tool| tool_wire(tool) }
-          end
-
-          def tool_wire(tool)
-            {
-              type: 'function',
-              function: {
-                name: tool_name(tool),
-                description: tool_desc(tool),
-                parameters: tool_params(tool)
+              {
+                type: 'function',
+                function: {
+                  name: name.to_s,
+                  description: description,
+                  parameters: parameters
+                }
               }
-            }
-          end
-
-          def tool_params(tool)
-            if tool.respond_to?(:parameters) && tool.parameters then tool.parameters
-            elsif tool[:parameters] then tool[:parameters]
-            elsif tool['parameters'] then tool['parameters']
-            elsif tool[:input_schema] then tool[:input_schema]
-            elsif tool['input_schema'] then tool['input_schema']
-            else { 'type' => 'object', 'properties' => {} }
             end
           end
 
-          def tool_name(tool)
-            tool.respond_to?(:name) ? tool.name : tool[:name] || tool['name']
-          end
+          # -- Parameter mapping (G18) --
 
-          def tool_desc(tool)
-            tool.respond_to?(:description) ? tool.description : (tool[:description] || tool['description'] || '')
-          end
+          def apply_options(payload, params)
+            return unless params.is_a?(Canonical::Params)
 
-          def render_tool_choice(tool_choice)
-            return nil unless tool_choice
+            options = {}
+            SUPPORTED_PARAMS.each do |param_key|
+              value = params.public_send(param_key)
+              next if value.nil?
 
-            case tool_choice
-            when Symbol then tool_choice.to_s
-            when Hash then tool_choice[:choice] || tool_choice['choice']
-            when String then tool_choice
+              wire_key = PARAM_OPTIONS_KEYS[param_key]
+              options[wire_key] = case param_key
+                                  when :stop_sequences
+                                    Array(value)
+                                  else
+                                    value
+                                  end
+            end
+
+            payload[:options] = options unless options.empty?
+
+            return unless params.max_thinking_tokens
+
+            log.debug do
+              '[llm][ollama-translator] action=drop_unsupported_param param=max_thinking_tokens ' \
+                "value=#{params.max_thinking_tokens} reason=ollama_not_supported"
             end
           end
 
-          def render_response_format(param)
-            return nil unless param.is_a?(Canonical::Params) && param.response_format
-            return nil unless param.response_format.is_a?(Hash)
+          # -- Thinking configuration --
 
-            rf_type = param.response_format[:type] || param.response_format['type']
-            return nil unless %w[json json_object].include?(rf_type)
+          def apply_thinking_config(payload, request)
+            return unless enable_thinking?(request)
 
-            param.response_format[:schema] || param.response_format['schema'] || { 'type' => 'object' }
+            payload[:think] = true
           end
 
-          def extract_thinking_from_content(content)
-            return { content: content, thinking: nil } unless content&.include?(OPEN_TAG)
+          def enable_thinking?(request)
+            return true if request.thinking.is_a?(Canonical::Thinking::Config) && request.thinking.enabled?
+            return true if request.thinking.is_a?(Hash) && (request.thinking[:enabled] != false)
 
-            parts = content.split(OPEN_TAG, 2)
-            pre_tag = parts[0]
-            if content.include?(CLOSE_TAG)
-              rest = parts[1] || ''
-              after = rest.split(CLOSE_TAG, 2)
-              { content: pre_tag + (after[1] || ''), thinking: after[0] }
-            else
-              { content: parts[0], thinking: parts[1] }
-            end
+            false
           end
 
-          def parse_tool_calls(message_data)
-            raw = raw_access(message_data, 'tool_calls')
-            return [] unless raw && !raw.empty?
+          # -- Response format --
 
-            raw.filter_map do |call|
-              func = raw_access(call, 'function') || {}
-              name = raw_access(func, 'name')
-              next unless name
+          def apply_response_format(payload, params)
+            return unless params.is_a?(Canonical::Params) && params.response_format
 
-              args_raw = raw_access(func, 'arguments') || {}
-              args = args_raw.is_a?(Hash) ? args_raw : parse_json_safely(args_raw.to_s) || {}
+            format_value = params.response_format
+            payload[:format] = if format_value.is_a?(Hash)
+                                 schema = format_value[:schema] || format_value['schema'] ||
+                                          format_value[:json_schema] || format_value['json_schema']
+                                 schema || format_value
+                               else
+                                 format_value
+                               end
+          end
+
+          # -- Response parsing --
+
+          def canonical_response?(wire)
+            wire.key?(:text) || wire.key?('text') || wire.key?(:stop_reason) || wire.key?('stop_reason')
+          end
+
+          def canonical_error_response(wire)
+            body = wire.is_a?(Hash) ? wire : {}
+            error_info = body['error'] || body[:error] ||
+                         { type: 'parse_error', message: 'Failed to parse response' }
+
+            Canonical::Response.build(
+              text: '',
+              tool_calls: [],
+              usage: Canonical::Usage.from_hash(body['usage'] || body[:usage] || {}),
+              stop_reason: :error,
+              model: body['model'] || body[:model],
+              metadata: { error: error_info }
+            )
+          end
+
+          def thinking_metadata(message)
+            thinking = message[:thinking] || message['thinking']
+            return {} unless thinking
+
+            { thinking: thinking }
+          end
+
+          def build_canonical_thinking(extraction)
+            return nil unless extraction.thinking || extraction.signature
+
+            Canonical::Thinking.new(
+              content: extraction.thinking,
+              signature: extraction.signature
+            )
+          end
+
+          def parse_tool_calls(tool_calls_raw)
+            return [] unless tool_calls_raw.is_a?(Array) && !tool_calls_raw.empty?
+
+            tool_calls_raw.filter_map do |call|
+              call = call.transform_keys(&:to_sym) if call.is_a?(Hash)
+              function = call[:function] || call['function'] || {}
+              function = function.transform_keys(&:to_sym) if function.is_a?(Hash)
+
+              name = function[:name] || function['name']
+              id = call[:id] || call['id'] || name
+              args = parse_tool_arguments(function[:arguments] || function['arguments'])
+
               Canonical::ToolCall.build(
-                id: raw_access(call, 'id') || name,
-                name: name,
+                id: id.to_s,
+                name: name.to_s,
                 arguments: args,
-                source: nil
+                source: :client
               )
+            rescue StandardError => e
+              handle_exception(e, level: :warn, handled: true, operation: 'ollama.translator.parse_tool_call')
+              nil
             end
           end
 
-          def parse_usage_from_hash(raw)
-            data = symbolize_hash(raw)
-            usage_hash = {
-              input_tokens: data[:prompt_eval_count],
-              output_tokens: data[:eval_count],
-              cache_read_tokens: data[:load_eval_count]
-            }.compact
-            usage_hash.empty? ? nil : Canonical::Usage.new(**usage_hash)
-          end
+          def parse_tool_arguments(arguments)
+            return {} if arguments.nil? || arguments == ''
+            return arguments if arguments.is_a?(Hash)
 
-          def parse_stop_reason(wire)
-            data = symbolize_hash(wire)
-            explicit = data[:stop_reason]
-            return explicit.to_sym if explicit && Canonical::Response::STOP_REASONS.include?(explicit.to_sym)
-
-            message_data = data[:message] || {}
-            tool_calls = raw_access(message_data, 'tool_calls')
-            return :tool_use if tool_calls && !tool_calls.empty?
-
-            :end_turn
-          end
-
-          def parse_json_safely(raw)
-            return {} unless raw.is_a?(String) && !raw.empty?
-
-            Legion::JSON.load(raw)
+            Legion::JSON.load(arguments)
           rescue Legion::JSON::ParseError
-            log.debug("[ollama][translator] arguments not parseable as JSON: #{e.message}")
             {}
           end
 
-          def symbolize_hash(obj)
-            return obj unless obj.is_a?(Hash)
-
-            obj.transform_keys(&:to_sym).transform_values do |v|
-              if v.is_a?(Hash) then symbolize_hash(v)
-              elsif v.is_a?(Array) then v.map { |item| item.is_a?(Hash) ? symbolize_hash(item) : item }
-              else v
-              end
+          def map_stop_reason(done_reason, done = nil)
+            if done_reason
+              OLLAMA_STOP_REASON_MAP.fetch(done_reason.to_s, FALLBACK_STOP_REASON)
+            elsif done
+              FALLBACK_STOP_REASON
             end
           end
 
-          def handle_dropped_param(_param_name)
-            return unless self.class.strict_params
+          # -- Chunk parsing --
 
-            raise ArgumentError, 'Ollama does not support parameter: {param_name}'
+          def normalize_chunk_input(raw)
+            return nil if raw.is_a?(String) && raw.strip.empty?
+
+            raw.is_a?(Hash) ? raw : parse_json_safely(raw)
           end
 
-          def raw_access(hash, key)
-            return nil unless hash.is_a?(Hash)
-
-            hash[key] || hash[key.to_s]
+          def handle_canonical_chunk(data)
+            normalized = data.is_a?(Hash) && data.keys.first.is_a?(Symbol) ? data : data.transform_keys(&:to_sym)
+            Canonical::Chunk.from_hash(normalized)
+          rescue StandardError => e
+            log.debug { "[llm][ollama-translator] action=canonical_chunk_parse_error error=#{e.message}" }
+            nil
           end
 
-          def default_settings
-            Legion::Extensions::Llm::Ollama.default_settings.dig(:instances, :default) || {}
+          def parse_ollama_chunk(data)
+            message = data[:message] || data['message'] || {}
+            done = data[:done] || data['done']
+            done_reason = data[:done_reason] || data['done_reason']
+            request_id = data[:request_id] || data['request_id'] || data[:id] || data['id']
+
+            # Done chunk
+            return build_done_chunk(data, done_reason, request_id) if done
+
+            # Tool call delta
+            tool_calls = message[:tool_calls] || message['tool_calls']
+            return build_tool_call_chunk(tool_calls, request_id) unless Array(tool_calls).empty?
+
+            # Thinking delta
+            thinking_content = message[:thinking] || message['thinking']
+            unless thinking_content.to_s.empty?
+              return Canonical::Chunk.thinking_delta(
+                delta: thinking_content.to_s,
+                request_id: request_id
+              )
+            end
+
+            # Text delta
+            content = message[:content] || message['content']
+            unless content.to_s.empty?
+              return Canonical::Chunk.text_delta(
+                delta: content.to_s,
+                request_id: request_id
+              )
+            end
+
+            nil
           end
 
-          def canonical_thinking(content)
-            return nil unless content
+          def build_done_chunk(data, done_reason, request_id)
+            usage = Canonical::Usage.from_hash({
+                                                 input_tokens: data[:prompt_eval_count] || data['prompt_eval_count'],
+                                                 output_tokens: data[:eval_count] || data['eval_count']
+                                               })
 
-            Canonical::Thinking.build(content: content.presence, signature: nil)
+            Canonical::Chunk.done(
+              request_id: request_id,
+              usage: usage,
+              stop_reason: map_stop_reason(done_reason, true)
+            )
           end
 
-          def done?(chunk)
-            raw_access(chunk, 'done') == true || chunk[:done] == true
+          def build_tool_call_chunk(tool_calls, request_id)
+            first_call = tool_calls.first
+            first_call = first_call.transform_keys(&:to_sym) if first_call.is_a?(Hash)
+            function = first_call[:function] || first_call['function'] || {}
+            function = function.transform_keys(&:to_sym) if function.is_a?(Hash)
+
+            tc = Canonical::ToolCall.build(
+              id: (first_call[:id] || first_call['id'] || function[:name] || 'synthesized').to_s,
+              name: (function[:name] || function['name']).to_s,
+              arguments: parse_tool_arguments(function[:arguments] || function['arguments']),
+              source: :client
+            )
+
+            Canonical::Chunk.tool_call_delta(
+              tool_call: tc,
+              request_id: request_id
+            )
           end
 
-          def final_chunk(chunk)
-            usage = parse_usage_from_hash(chunk)
-            stop_reason = parse_stop_reason(chunk)
-            request_id = chunk[:request_id] || chunk['request_id']
-            Canonical::Chunk.done(request_id: request_id, usage: usage, stop_reason: stop_reason)
-          end
+          # -- JSON helpers --
 
-          def tool_call_delta(chunk, request_id, index)
-            message_data = chunk[:message] || chunk['message'] || {}
-            raw_tool_calls = raw_access(message_data, 'tool_calls')
-            return nil unless raw_tool_calls && !raw_tool_calls.empty?
+          def parse_json_safely(raw)
+            return nil unless raw.is_a?(String)
 
-            tc_raw = raw_tool_calls.first
-            func = raw_access(tc_raw, 'function') || {}
-            name = raw_access(func, 'name')
-            tc_id = raw_access(tc_raw, 'id') || name
-            args_raw = raw_access(func, 'arguments') || {}
-            args = args_raw.is_a?(Hash) ? args_raw : parse_json_safely(args_raw.to_s) || {}
-
-            canonical_tc = Canonical::ToolCall.build(id: tc_id, name: name, arguments: args)
-            Canonical::Chunk.tool_call_delta(tool_call: canonical_tc, request_id: request_id, index: index)
+            Legion::JSON.load(raw)
+          rescue Legion::JSON::ParseError => e
+            log.debug { "[llm][ollama-translator] action=json_parse_error error=#{e.message}" }
+            nil
           end
         end
       end
