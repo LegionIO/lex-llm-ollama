@@ -5,6 +5,14 @@ require 'legion/logging'
 require 'legion/extensions/llm'
 require 'legion/extensions/llm/ollama'
 
+# Load conformance kit from installed lex-llm gem's spec/ directory.
+# Per Phase 2 amended spec: spec/ ships in the gem; it is NOT on the load path.
+lex_llm_spec = Gem.loaded_specs['lex-llm']
+if lex_llm_spec
+  kit_path = File.join(lex_llm_spec.full_gem_path, 'spec/legion/extensions/llm/conformance')
+  Dir[File.join(kit_path, '**', '*.rb')].sort.each { |f| require f rescue next } if Dir.exist?(kit_path)
+end
+
 Legion::Logging.instance_variable_set(
   :@current_settings,
   {
