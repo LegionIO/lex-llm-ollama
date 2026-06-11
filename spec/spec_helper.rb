@@ -10,7 +10,13 @@ require 'legion/extensions/llm/ollama'
 lex_llm_spec = Gem.loaded_specs['lex-llm']
 if lex_llm_spec
   kit_path = File.join(lex_llm_spec.full_gem_path, 'spec/legion/extensions/llm/conformance')
-  Dir[File.join(kit_path, '**', '*.rb')].sort.each { |f| require f rescue next } if Dir.exist?(kit_path)
+  if Dir.exist?(kit_path)
+    Dir[File.join(kit_path, '**', '*.rb')].each do |f|
+      require f
+    rescue StandardError
+      next
+    end
+  end
 end
 
 Legion::Logging.instance_variable_set(
