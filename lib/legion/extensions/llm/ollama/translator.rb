@@ -246,10 +246,9 @@ module Legion
 
               name = tool_hash[:name] || tool_hash['name']
               description = (tool_hash[:description] || tool_hash['description'] || '').to_s
-              parameters = tool_hash[:parameters] || tool_hash[:input_schema] ||
-                           { type: 'object', properties: {} }
-              parameters = parameters.to_h if parameters.respond_to?(:to_h) && !parameters.is_a?(Hash)
-              parameters = { type: 'object', properties: {} } unless parameters.is_a?(Hash)
+              raw_params = tool_hash[:parameters] || tool_hash[:input_schema]
+              raw_params = raw_params.to_h if raw_params.respond_to?(:to_h) && !raw_params.is_a?(Hash)
+              parameters = Legion::Extensions::Llm::Canonical::ToolDefinition.normalize_parameters(raw_params)
 
               {
                 type: 'function',
