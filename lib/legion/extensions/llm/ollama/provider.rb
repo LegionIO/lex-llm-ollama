@@ -357,16 +357,16 @@ module Legion
           def format_tools(tools)
             return nil if tools.empty?
 
-            tool_names = tools.values.filter_map { |tool| tool.respond_to?(:name) ? tool.name : nil }
+            tool_names = tools.values.filter_map { |tool| Legion::Extensions::Llm::Canonical::ToolSchema.tool_name(tool) }
             log.debug { "ollama provider formatting tools count=#{tools.size} names=#{tool_names.join(',')}" }
 
             tools.values.map do |tool|
               {
                 type: 'function',
                 function: {
-                  name: tool.name,
-                  description: tool.description,
-                  parameters: tool.params_schema || { type: 'object', properties: {} }
+                  name: Legion::Extensions::Llm::Canonical::ToolSchema.tool_name(tool),
+                  description: Legion::Extensions::Llm::Canonical::ToolSchema.tool_description(tool),
+                  parameters: Legion::Extensions::Llm::Canonical::ToolSchema.extract(tool)
                 }
               }
             end
