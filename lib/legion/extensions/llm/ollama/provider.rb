@@ -171,6 +171,7 @@ module Legion
           end
 
           def offering_from_model(model_info, loaded: false)
+            policy = resolve_capability_policy(model_info)
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :ollama,
               instance_id: config.respond_to?(:instance_id) ? config.instance_id : :default,
@@ -178,18 +179,64 @@ module Legion
               tier: offering_tier,
               model: model_info.id,
               usage_type: offering_usage_type(model_info),
-              capabilities: offering_capabilities(model_info),
+              capabilities: policy[:capabilities],
+              capability_sources: policy[:sources],
               limits: offering_limits(model_info),
               metadata: offering_metadata(model_info).merge(loaded: loaded)
             )
           end
 
-          def offering_usage_type(model_info)
-            model_info.embedding? ? :embedding : :inference
+          def resolve_capability_policy(model_info)
+            model_id = model_info.id.to_s
+            Legion::Extensions::Llm::CapabilityPolicy.resolve(
+              real: capabilities_from_api(model_info),
+              provider_catalog: {},
+              probe: {},
+              provider_envelope: { streaming: true },
+              provider_config: provider_level_config,
+              instance_config: instance_level_config,
+              model_config: model_level_config(model_id)
+            )
           end
 
-          def offering_capabilities(model_info)
-            model_info.capabilities.map(&:to_s)
+          def capabilities_from_api(model_info)
+            Array(model_info.capabilities).each_with_object({}) do |cap, hash|
+              sym = cap.to_s.downcase.to_sym
+              hash[sym] = true
+            end
+          end
+
+          def provider_level_config
+            raw = CredentialSources.setting(:extensions, :llm, :ollama)
+            return {} unless raw.is_a?(Hash)
+
+            raw.reject { |k, _| k.to_sym == :instances }
+          end
+
+          def instance_level_config
+            extract_config_hash
+          end
+
+          def model_level_config(model_id)
+            data = extract_config_hash
+            models = data[:models]
+            return {} unless models.is_a?(Hash)
+
+            models[model_id.to_sym] || models[model_id.to_s] || models[model_id] || {}
+          end
+
+          def extract_config_hash
+            return config.to_h if config.respond_to?(:to_h) && !config.is_a?(Legion::Extensions::Llm::HashConfig)
+
+            if config.is_a?(Legion::Extensions::Llm::HashConfig)
+              config.instance_variable_get(:@data) || {}
+            else
+              {}
+            end
+          end
+
+          def offering_usage_type(model_info)
+            model_info.embedding? ? :embedding : :inference
           end
 
           def offering_limits(model_info)

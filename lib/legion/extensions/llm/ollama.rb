@@ -72,7 +72,8 @@ module Legion
           instances[:local] = {
             base_url: 'http://127.0.0.1:11434',
             tier: :local,
-            capabilities: %i[completion embedding vision]
+            capabilities: {},
+            provider_capabilities: { streaming: true }
           }
         end
 
@@ -84,7 +85,8 @@ module Legion
           configured.each do |name, config|
             instances[name.to_sym] = normalize_instance_config(config).merge(
               tier: :direct,
-              capabilities: %i[completion embedding vision]
+              capabilities: {},
+              provider_capabilities: { streaming: true }
             )
           end
         end

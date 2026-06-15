@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.16 - 2026-06-15
+
+- **CapabilityPolicy integration** — Optional capabilities default false; API-provided capabilities tagged as `:model_metadata`. Settings overrides at provider/instance/model level supported.
+
 ## 0.2.15 - 2026-06-13
 
 - **Gemfile cleanup** — Remove local path overrides; dependencies resolve from gemspec via rubygems.

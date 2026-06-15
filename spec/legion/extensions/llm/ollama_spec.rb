@@ -165,7 +165,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       expect(described_class.discover_instances[:lab]).to include(
         base_url: 'http://lab:11434',
         tier: :direct,
-        capabilities: %i[completion embedding vision]
+        capabilities: {},
+        provider_capabilities: { streaming: true }
       )
     end
   end
@@ -235,5 +236,84 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     allow(Thread).to receive(:new).and_yield
     publisher.publish_models_async(models, readiness:)
     events
+  end
+
+  describe 'CapabilityPolicy integration' do
+    let(:policy_provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
+
+    before do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :ollama).and_return({})
+    end
+
+    it 'reports API-provided capabilities as :model_metadata source' do
+      model = Legion::Extensions::Llm::Model::Info.new(
+        id: 'qwen3:8b', provider: :ollama,
+        capabilities: %i[completion tools]
+      )
+      offering = policy_provider.send(:offering_from_model, model)
+
+      expect(offering.capabilities).to include(:tools)
+      expect(offering.capability_sources[:tools]).to eq({ value: true, source: :model_metadata })
+    end
+
+    it 'defaults optional capabilities to false when no API capabilities exist' do
+      model = Legion::Extensions::Llm::Model::Info.new(id: 'bare-model:latest', provider: :ollama)
+      offering = policy_provider.send(:offering_from_model, model)
+
+      expect(offering.capability_sources[:tools]).to eq({ value: false, source: :default_false })
+      expect(offering.capability_sources[:thinking]).to eq({ value: false, source: :default_false })
+      expect(offering.capability_sources[:vision]).to eq({ value: false, source: :default_false })
+    end
+
+    it 'applies streaming from provider_envelope for all models' do
+      model = Legion::Extensions::Llm::Model::Info.new(id: 'bare-model:latest', provider: :ollama)
+      offering = policy_provider.send(:offering_from_model, model)
+
+      expect(offering.capabilities).to include(:streaming)
+      expect(offering.capability_sources[:streaming]).to eq({ value: true, source: :provider_envelope })
+    end
+
+    it 'applies provider-level overrides with :provider_override source' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :ollama).and_return({ streaming_flag: true, tool_flag: false })
+
+      model = Legion::Extensions::Llm::Model::Info.new(
+        id: 'qwen3:8b', provider: :ollama, capabilities: %i[completion tools]
+      )
+      offering = policy_provider.send(:offering_from_model, model)
+
+      expect(offering.capability_sources[:streaming]).to eq({ value: true, source: :provider_override })
+      expect(offering.capability_sources[:tools]).to eq({ value: false, source: :provider_override })
+    end
+
+    it 'applies instance-level overrides with :instance_override source' do
+      configured = described_class::Provider.new(
+        instance_id: :gpu_node, capabilities: { streaming: true, tools: true }
+      )
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :ollama).and_return({})
+
+      model = Legion::Extensions::Llm::Model::Info.new(id: 'llama3:8b', provider: :ollama)
+      offering = configured.send(:offering_from_model, model)
+
+      expect(offering.capability_sources[:streaming]).to eq({ value: true, source: :instance_override })
+      expect(offering.capability_sources[:tools]).to eq({ value: true, source: :instance_override })
+    end
+
+    it 'applies model-level overrides with :model_override source' do
+      configured = described_class::Provider.new(
+        instance_id: :default,
+        models: { 'llama3:8b' => { tools_flag: true, thinking_flag: true } }
+      )
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :ollama).and_return({})
+
+      model = Legion::Extensions::Llm::Model::Info.new(id: 'llama3:8b', provider: :ollama)
+      offering = configured.send(:offering_from_model, model)
+
+      expect(offering.capability_sources[:tools]).to eq({ value: true, source: :model_override })
+      expect(offering.capability_sources[:thinking]).to eq({ value: true, source: :model_override })
+    end
   end
 end
