@@ -5,6 +5,7 @@ require 'legion/extensions/llm/ollama/provider'
 require 'legion/extensions/llm/ollama/translator'
 require 'legion/extensions/llm/ollama/version'
 require 'legion/logging/helper'
+require_relative 'ollama/actors/discovery_refresh'
 
 module Legion
   module Extensions
@@ -31,10 +32,7 @@ module Legion
               fleet: {
                 enabled: false,
                 respond_to_requests: false,
-                capabilities: %i[chat stream_chat embed tools],
-                lanes: [],
-                concurrency: 1,
-                queue_suffix: nil
+                capabilities: %i[chat stream_chat embed tools]
               }
             }
           )

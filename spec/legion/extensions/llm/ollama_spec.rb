@@ -123,6 +123,26 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(provider.discover_offerings).to eq([])
   end
 
+  it 'annotates offerings with loaded: true for running models' do
+    stub_model_discovery
+    offerings = provider.discover_offerings(live: true)
+
+    expect(offerings.first.metadata[:loaded]).to be(true)
+  end
+
+  it 'annotates offerings with loaded: false for registered but not running models' do
+    allow(provider.connection).to receive(:get).with('/api/tags').and_return(
+      fake_response({ 'models' => [{ 'name' => 'qwen3.6:27b', 'details' => { 'family' => 'qwen35' } }] })
+    )
+    allow(provider.connection).to receive(:get).with('/api/ps').and_return(
+      fake_response({ 'models' => [] })
+    )
+
+    offerings = provider.discover_offerings(live: true)
+
+    expect(offerings.first.metadata[:loaded]).to be(false)
+  end
+
   it 'builds sanitized lex-llm registry events for Ollama model availability' do
     events = capture_registry_events([nomic_embed_model], readiness: { ready: true })
 
@@ -189,6 +209,9 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
   def stub_model_discovery
     allow(provider.connection).to receive(:get).with('/api/tags').and_return(
       fake_response({ 'models' => [{ 'name' => 'qwen3.6:27b', 'details' => { 'family' => 'qwen35' } }] })
+    )
+    allow(provider.connection).to receive(:get).with('/api/ps').and_return(
+      fake_response({ 'models' => [{ 'name' => 'qwen3.6:27b' }] })
     )
   end
 
