@@ -54,10 +54,10 @@ RSpec.describe Legion::Extensions::Llm::Ollama, '.discover_instances' do
   end
 
   def local_instance_config
-    { base_url: 'http://127.0.0.1:11434', tier: :local, capabilities: %i[completion embedding vision] }
+    { base_url: 'http://127.0.0.1:11434', tier: :local, capabilities: {}, provider_capabilities: { streaming: true } }
   end
 
   def settings_instance_config(base_url)
-    { base_url: base_url, tier: :direct, capabilities: %i[completion embedding vision] }
+    { base_url: base_url, tier: :direct, capabilities: {}, provider_capabilities: { streaming: true } }
   end
 end

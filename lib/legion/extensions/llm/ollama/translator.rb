@@ -246,10 +246,9 @@ module Legion
 
               name = tool_hash[:name] || tool_hash['name']
               description = (tool_hash[:description] || tool_hash['description'] || '').to_s
-              parameters = tool_hash[:parameters] || tool_hash[:input_schema] ||
-                           { type: 'object', properties: {} }
-              parameters = parameters.to_h if parameters.respond_to?(:to_h) && !parameters.is_a?(Hash)
-              parameters = { type: 'object', properties: {} } unless parameters.is_a?(Hash)
+              raw_params = tool_hash[:parameters] || tool_hash[:input_schema]
+              raw_params = raw_params.to_h if raw_params.respond_to?(:to_h) && !raw_params.is_a?(Hash)
+              parameters = Legion::Extensions::Llm::Canonical::ToolDefinition.normalize_parameters(raw_params)
 
               {
                 type: 'function',
@@ -421,9 +420,6 @@ module Legion
             done_reason = data[:done_reason] || data['done_reason']
             request_id = data[:request_id] || data['request_id'] || data[:id] || data['id']
 
-            # Done chunk
-            return build_done_chunk(data, done_reason, request_id) if done
-
             # Tool call delta
             tool_calls = message[:tool_calls] || message['tool_calls']
             return build_tool_call_chunk(tool_calls, request_id) unless Array(tool_calls).empty?
@@ -437,7 +433,7 @@ module Legion
               )
             end
 
-            # Text delta
+            # Text delta — emit content even on done chunks (Ollama's final chunk may carry text)
             content = message[:content] || message['content']
             unless content.to_s.empty?
               return Canonical::Chunk.text_delta(
@@ -445,6 +441,9 @@ module Legion
                 request_id: request_id
               )
             end
+
+            # Done chunk (only when no content/thinking/tool_calls to emit)
+            return build_done_chunk(data, done_reason, request_id) if done
 
             nil
           end

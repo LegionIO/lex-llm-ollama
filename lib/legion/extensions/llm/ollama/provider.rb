@@ -41,6 +41,10 @@ module Legion
             Ollama.default_settings
           end
 
+          def translator
+            @translator ||= Translator.new(config: config)
+          end
+
           def api_base
             resolve_base_url || normalize_url(settings[:base_url] || settings[:endpoint] || 'http://127.0.0.1:11434')
           end
@@ -112,10 +116,11 @@ module Legion
             log.debug do
               "ollama provider discovering offerings live=#{live} cached_model_count=#{Array(@cached_models).size}"
             end
+            running_ids = live ? running_model_ids : []
             offerings = resolve_models(live).filter_map do |model_info|
               next unless model_allowed?(model_info.id)
 
-              offering_from_model(model_info)
+              offering_from_model(model_info, loaded: running_ids.include?(model_info.id.to_s))
             end
             log.debug { "ollama provider built offering_count=#{offerings.size} live=#{live}" }
             offerings
@@ -159,7 +164,14 @@ module Legion
             end
           end
 
-          def offering_from_model(model_info)
+          def running_model_ids
+            Array(list_running_models).filter_map do |m|
+              m['name'] || m[:name] || m['model'] || m[:model]
+            end.map(&:to_s)
+          end
+
+          def offering_from_model(model_info, loaded: false)
+            policy = resolve_capability_policy(model_info)
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :ollama,
               instance_id: config.respond_to?(:instance_id) ? config.instance_id : :default,
@@ -167,18 +179,64 @@ module Legion
               tier: offering_tier,
               model: model_info.id,
               usage_type: offering_usage_type(model_info),
-              capabilities: offering_capabilities(model_info),
+              capabilities: policy[:capabilities],
+              capability_sources: policy[:sources],
               limits: offering_limits(model_info),
-              metadata: offering_metadata(model_info)
+              metadata: offering_metadata(model_info).merge(loaded: loaded)
             )
+          end
+
+          def resolve_capability_policy(model_info)
+            model_id = model_info.id.to_s
+            Legion::Extensions::Llm::CapabilityPolicy.resolve(
+              real: capabilities_from_api(model_info),
+              provider_catalog: {},
+              probe: {},
+              provider_envelope: { streaming: true },
+              provider_config: provider_level_config,
+              instance_config: instance_level_config,
+              model_config: model_level_config(model_id)
+            )
+          end
+
+          def capabilities_from_api(model_info)
+            Array(model_info.capabilities).each_with_object({}) do |cap, hash|
+              sym = cap.to_s.downcase.to_sym
+              hash[sym] = true
+            end
+          end
+
+          def provider_level_config
+            raw = CredentialSources.setting(:extensions, :llm, :ollama)
+            return {} unless raw.is_a?(Hash)
+
+            raw.reject { |k, _| k.to_sym == :instances }
+          end
+
+          def instance_level_config
+            extract_config_hash
+          end
+
+          def model_level_config(model_id)
+            data = extract_config_hash
+            models = data[:models]
+            return {} unless models.is_a?(Hash)
+
+            models[model_id.to_sym] || models[model_id.to_s] || models[model_id] || {}
+          end
+
+          def extract_config_hash
+            return config.to_h if config.respond_to?(:to_h) && !config.is_a?(Legion::Extensions::Llm::HashConfig)
+
+            if config.is_a?(Legion::Extensions::Llm::HashConfig)
+              config.instance_variable_get(:@data) || {}
+            else
+              {}
+            end
           end
 
           def offering_usage_type(model_info)
             model_info.embedding? ? :embedding : :inference
-          end
-
-          def offering_capabilities(model_info)
-            model_info.capabilities.map(&:to_s)
           end
 
           def offering_limits(model_info)
@@ -357,16 +415,16 @@ module Legion
           def format_tools(tools)
             return nil if tools.empty?
 
-            tool_names = tools.values.filter_map { |tool| tool.respond_to?(:name) ? tool.name : nil }
+            tool_names = tools.values.filter_map { |tool| Legion::Extensions::Llm::Canonical::ToolSchema.tool_name(tool) }
             log.debug { "ollama provider formatting tools count=#{tools.size} names=#{tool_names.join(',')}" }
 
             tools.values.map do |tool|
               {
                 type: 'function',
                 function: {
-                  name: tool.name,
-                  description: tool.description,
-                  parameters: tool.params_schema || { type: 'object', properties: {} }
+                  name: Legion::Extensions::Llm::Canonical::ToolSchema.tool_name(tool),
+                  description: Legion::Extensions::Llm::Canonical::ToolSchema.tool_description(tool),
+                  parameters: Legion::Extensions::Llm::Canonical::ToolSchema.extract(tool)
                 }
               }
             end
@@ -380,67 +438,74 @@ module Legion
 
           def parse_completion_response(response)
             body = response.body
-            message = body.fetch('message', {})
-            content, thinking = extract_thinking_from_completion(message)
-            Legion::Extensions::Llm::Message.new(
-              role: :assistant,
-              content: content,
-              model_id: body['model'],
-              tool_calls: parse_tool_calls(message['tool_calls']),
-              thinking: thinking,
-              input_tokens: body['prompt_eval_count'],
-              output_tokens: body['eval_count'],
-              raw: body
-            )
+            canonical = translator.parse_response(body)
+            to_legacy_message(canonical, body)
           end
 
           def build_chunk(data)
-            message = data.fetch('message', {})
-            thinking = message['thinking']
+            canonical_chunk = translator.parse_chunk(data)
+            return nil if canonical_chunk.nil?
+
+            to_legacy_chunk(canonical_chunk, data)
+          end
+
+          def to_legacy_message(canonical, raw_body)
+            usage = canonical.usage
+            Legion::Extensions::Llm::Message.new(
+              role: :assistant,
+              content: canonical.text,
+              model_id: canonical.model,
+              thinking: if canonical.thinking
+                          Legion::Extensions::Llm::Thinking.build(
+                            text: canonical.thinking.content, signature: canonical.thinking.signature
+                          )
+                        end,
+              tool_calls: legacy_tool_calls(canonical.tool_calls),
+              input_tokens: usage&.input_tokens,
+              output_tokens: usage&.output_tokens,
+              raw: raw_body
+            )
+          end
+
+          def to_legacy_chunk(canonical_chunk, raw_data)
             Legion::Extensions::Llm::Chunk.new(
               role: :assistant,
-              content: message['content'],
-              thinking: thinking ? Thinking.build(text: thinking) : nil,
-              tool_calls: parse_tool_calls(message['tool_calls']),
-              model_id: data['model'],
-              input_tokens: data['prompt_eval_count'],
-              output_tokens: data['eval_count'],
-              raw: data
+              content: canonical_chunk.text_delta? ? canonical_chunk.delta : nil,
+              thinking: if canonical_chunk.thinking_delta?
+                          Legion::Extensions::Llm::Thinking.build(
+                            text: canonical_chunk.delta
+                          )
+                        end,
+              tool_calls: legacy_streaming_tool_calls(canonical_chunk),
+              model_id: raw_data['model'] || raw_data[:model],
+              input_tokens: canonical_chunk.usage&.input_tokens ||
+                             raw_data['prompt_eval_count'] || raw_data[:prompt_eval_count],
+              output_tokens: canonical_chunk.usage&.output_tokens ||
+                              raw_data['eval_count'] || raw_data[:eval_count],
+              raw: raw_data
             )
           end
 
-          def extract_thinking_from_completion(message)
-            extraction = Responses::ThinkingExtractor.extract(
-              message['content'],
-              metadata: thinking_metadata(message)
-            )
+          def legacy_tool_calls(canonical_tool_calls)
+            return nil if canonical_tool_calls.nil? || canonical_tool_calls.empty?
 
-            [
-              extraction.content,
-              Thinking.build(text: extraction.thinking, signature: extraction.signature)
-            ]
-          end
-
-          def thinking_metadata(message)
-            { thinking: message['thinking'] }.compact
-          end
-
-          def parse_tool_calls(tool_calls)
-            return nil unless tool_calls
-
-            log.debug { "ollama provider parsing tool_call_count=#{tool_calls.size}" }
-
-            tool_calls.to_h do |call|
-              function = call.fetch('function', {})
+            canonical_tool_calls.to_h do |tc|
               [
-                function.fetch('name').to_sym,
-                Legion::Extensions::Llm::ToolCall.new(
-                  id: call['id'] || function['name'],
-                  name: function['name'],
-                  arguments: function['arguments'] || {}
-                )
+                (tc.name || tc.id).to_s.to_sym,
+                Legion::Extensions::Llm::ToolCall.new(id: tc.id, name: tc.name, arguments: tc.arguments || {})
               ]
             end
+          end
+
+          def legacy_streaming_tool_calls(canonical_chunk)
+            return nil unless canonical_chunk.tool_call_delta?
+
+            tc = canonical_chunk.tool_call
+            return nil unless tc
+
+            { (tc.name || tc.id).to_s.to_sym => Legion::Extensions::Llm::ToolCall.new(
+              id: tc.id, name: tc.name, arguments: tc.arguments || ''
+            ) }
           end
 
           def parse_list_models_response(response, provider, _capabilities)

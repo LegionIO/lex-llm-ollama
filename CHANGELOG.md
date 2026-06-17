@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.17 - 2026-06-16
+
+- dependency updates, code quality improvements
+
+## 0.2.16 - 2026-06-15
+
+- **CapabilityPolicy integration** — Optional capabilities default false; API-provided capabilities tagged as `:model_metadata`. Settings overrides at provider/instance/model level supported.
+
+## 0.2.15 - 2026-06-13
+
+- **Gemfile cleanup** — Remove local path overrides; dependencies resolve from gemspec via rubygems.
+- **Canonical tool support** — Use `ToolSchema.extract`, add `:tools` capability, canonical normalization for tool parameter schemas.
+- 147 examples, 0 failures; 17 files, 0 rubocop offenses.
+
 ## 0.2.14 - 2026-06-05
 
 - Verified specs and RuboCop compliance (52 examples, 0 failures; 15 files, 0 offenses)

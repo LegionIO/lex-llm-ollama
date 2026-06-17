@@ -5,6 +5,7 @@ require 'legion/extensions/llm/ollama/provider'
 require 'legion/extensions/llm/ollama/translator'
 require 'legion/extensions/llm/ollama/version'
 require 'legion/logging/helper'
+require_relative 'ollama/actors/discovery_refresh'
 
 module Legion
   module Extensions
@@ -31,10 +32,7 @@ module Legion
               fleet: {
                 enabled: false,
                 respond_to_requests: false,
-                capabilities: %i[chat stream_chat embed],
-                lanes: [],
-                concurrency: 1,
-                queue_suffix: nil
+                capabilities: %i[chat stream_chat embed tools]
               }
             }
           )
@@ -74,7 +72,8 @@ module Legion
           instances[:local] = {
             base_url: 'http://127.0.0.1:11434',
             tier: :local,
-            capabilities: %i[completion embedding vision]
+            capabilities: {},
+            provider_capabilities: { streaming: true }
           }
         end
 
@@ -86,7 +85,8 @@ module Legion
           configured.each do |name, config|
             instances[name.to_sym] = normalize_instance_config(config).merge(
               tier: :direct,
-              capabilities: %i[completion embedding vision]
+              capabilities: {},
+              provider_capabilities: { streaming: true }
             )
           end
         end
