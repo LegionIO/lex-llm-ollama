@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.17 - 2026-06-16
+
+- dependency updates, code quality improvements
+
 ## 0.2.16 - 2026-06-15
 
 - **CapabilityPolicy integration** — Optional capabilities default false; API-provided capabilities tagged as `:model_metadata`. Settings overrides at provider/instance/model level supported.

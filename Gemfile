@@ -2,8 +2,6 @@
 
 source 'https://rubygems.org'
 
-gem 'lex-llm', path: '../lex-llm'
-
 gemspec
 
 group :development do
