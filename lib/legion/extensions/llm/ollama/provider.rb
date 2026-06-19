@@ -352,7 +352,7 @@ module Legion
             chunks << built
             block&.call(built)
           rescue Legion::JSON::ParseError => e
-            handle_exception(e, level: :debug, handled: true, operation: 'ollama.stream_parse')
+            handle_exception(e, level: :warn, handled: true, operation: 'ollama.stream_parse')
           end
 
           def finalize_stream(chunks)
