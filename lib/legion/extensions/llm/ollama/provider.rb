@@ -77,7 +77,7 @@ module Legion
             end
           end
 
-          def list_models
+          def list_models(live: false, **filters)
             log.debug { "ollama provider discovering models endpoint=#{api_base}#{models_url}" }
             super.tap do |models|
               log.debug { "ollama provider discovered model_count=#{models.size}" }
@@ -110,27 +110,6 @@ module Legion
           rescue StandardError => e
             handle_exception(e, level: :error, handled: true, operation: 'ollama.pull_model')
             raise
-          end
-
-          def discover_offerings(live: false, **)
-            log.debug do
-              "ollama provider discovering offerings live=#{live} cached_model_count=#{Array(@cached_models).size}"
-            end
-            running_ids = live ? running_model_ids : []
-            offerings = resolve_models(live).filter_map do |model_info|
-              next unless model_allowed?(model_info.id)
-
-              offering_from_model(model_info, loaded: running_ids.include?(model_info.id.to_s))
-            end
-            log.debug { "ollama provider built offering_count=#{offerings.size} live=#{live}" }
-            offerings
-          rescue Faraday::ConnectionFailed => e
-            log.warn("[ollama] instance=#{provider_instance_id} unreachable: #{e.message}")
-            []
-          rescue StandardError => e
-            handle_exception(e, level: :warn, handled: true, operation: 'ollama.discover_offerings',
-                                backtrace_limit: 3)
-            []
           end
 
           CONTEXT_WINDOWS = {
@@ -170,8 +149,20 @@ module Legion
             end.map(&:to_s)
           end
 
-          def offering_from_model(model_info, loaded: false)
+          def offering_from_model(model_info, health: {})
+            loaded = begin
+              running_model_ids.include?(model_info.id.to_s)
+            rescue StandardError
+              health.is_a?(Hash) ? health.fetch(:loaded, false) : false
+            end
             policy = resolve_capability_policy(model_info)
+            embedding_model = model_info.embedding?
+            capabilities = embedding_model ? [:embedding] : policy[:capabilities]
+            capability_sources = if embedding_model
+                                   policy[:sources].merge(embedding: { value: true, source: :model_metadata })
+                                 else
+                                   policy[:sources]
+                                 end
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :ollama,
               instance_id: config.respond_to?(:instance_id) ? config.instance_id : :default,
@@ -179,8 +170,8 @@ module Legion
               tier: offering_tier,
               model: model_info.id,
               usage_type: offering_usage_type(model_info),
-              capabilities: policy[:capabilities],
-              capability_sources: policy[:sources],
+              capabilities: capabilities,
+              capability_sources: capability_sources,
               limits: offering_limits(model_info),
               metadata: offering_metadata(model_info).merge(loaded: loaded)
             )
@@ -193,9 +184,9 @@ module Legion
               provider_catalog: {},
               probe: {},
               provider_envelope: { streaming: true },
-              provider_config: provider_level_config,
-              instance_config: instance_level_config,
-              model_config: model_level_config(model_id)
+              provider_config: provider_capability_config,
+              instance_config: instance_capability_config,
+              model_config: model_capability_config(model_id)
             )
           end
 
@@ -203,35 +194,6 @@ module Legion
             Array(model_info.capabilities).each_with_object({}) do |cap, hash|
               sym = cap.to_s.downcase.to_sym
               hash[sym] = true
-            end
-          end
-
-          def provider_level_config
-            raw = CredentialSources.setting(:extensions, :llm, :ollama)
-            return {} unless raw.is_a?(Hash)
-
-            raw.reject { |k, _| k.to_sym == :instances }
-          end
-
-          def instance_level_config
-            extract_config_hash
-          end
-
-          def model_level_config(model_id)
-            data = extract_config_hash
-            models = data[:models]
-            return {} unless models.is_a?(Hash)
-
-            models[model_id.to_sym] || models[model_id.to_s] || models[model_id] || {}
-          end
-
-          def extract_config_hash
-            return config.to_h if config.respond_to?(:to_h) && !config.is_a?(Legion::Extensions::Llm::HashConfig)
-
-            if config.is_a?(Legion::Extensions::Llm::HashConfig)
-              config.instance_variable_get(:@data) || {}
-            else
-              {}
             end
           end
 

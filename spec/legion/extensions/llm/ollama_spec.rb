@@ -117,10 +117,19 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(offering.to_h).to include(instance_id: :fleet_node, transport: :rabbitmq, tier: :fleet)
   end
 
+  it 'preserves embedding capability on embedding offerings' do
+    offering = provider.send(:offering_from_model, nomic_embed_model)
+
+    expect(offering.capabilities).to include(:embedding)
+    expect(offering.capabilities).not_to include(:streaming)
+  end
+
   it 'marks offerings discovery fallback exceptions as handled' do
     stub_cached_offering_failure
 
-    expect(provider.discover_offerings).to eq([])
+    offerings = provider.discover_offerings
+
+    expect(offerings.map(&:model)).to eq(['qwen3.6:27b'])
   end
 
   it 'annotates offerings with loaded: true for running models' do

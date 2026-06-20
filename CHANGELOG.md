@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.20] - 2026-06-20
+
+### Changed
+- Slow the live discovery refresh cadence from 60 seconds to 300 seconds for Ollama instances; `extensions.llm.ollama.discovery_interval` still overrides the default.
+
+## [0.2.19] - 2026-06-20
+
+### Fixed
+- Route Ollama capability overrides through the shared `lex-llm` provider contract and preserve the canonical singular `:embedding` capability on embedding offerings.
+
 ## [0.2.18] - 2026-06-19
 
 ### Changed
