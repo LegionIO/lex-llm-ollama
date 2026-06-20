@@ -81,8 +81,21 @@ module Legion
             log.debug { "ollama provider discovering models endpoint=#{api_base}#{models_url}" }
             super.tap do |models|
               log.debug { "ollama provider discovered model_count=#{models.size}" }
-              self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
             end
+          end
+
+          def discover_offerings(live: false, raise_on_unreachable: false, **filters)
+            return filter_cached_offerings(Array(@cached_offerings), filters) unless live
+
+            provider_health = health(live:)
+            @cached_offerings = discover_live_offerings(filters, provider_health, live:)
+            log_discover_complete(@cached_offerings)
+            @cached_offerings
+          rescue Faraday::ConnectionFailed, Faraday::TimeoutError => e
+            log.warn("[#{slug}] instance=#{provider_instance_id} unreachable: #{e.message}")
+            raise if raise_on_unreachable
+
+            []
           end
 
           def show_model(model)
@@ -112,6 +125,44 @@ module Legion
             raise
           end
 
+          private
+
+          def discovery_registry_readiness(provider_health, live:)
+            {
+              provider: slug.to_sym,
+              configured: configured?,
+              ready: provider_health[:ready] == true,
+              live: live,
+              health: provider_health
+            }
+          end
+
+          def discover_live_offerings(filters, provider_health, live:)
+            readiness = discovery_registry_readiness(provider_health, live:)
+            Array(list_models(live:, **filters)).filter_map do |model|
+              self.class.registry_publisher.publish_models_async([model], readiness:)
+              next unless model_matches_filters?(model, filters)
+              next unless model_allowed?(model.id)
+
+              log_model_discovered(model)
+              offering_from_model(model, health: provider_health)
+            end
+          end
+
+          def log_model_discovered(model)
+            log.unknown(
+              "[#{slug}] instance=#{provider_instance_id} action=model_discovered " \
+              "model=#{model.id} family=#{model.family}"
+            )
+          end
+
+          def log_discover_complete(offerings)
+            log.info(
+              "[#{slug}] instance=#{provider_instance_id} action=discover_complete " \
+              "model_count=#{Array(offerings).size}"
+            )
+          end
+
           CONTEXT_WINDOWS = {
             'qwen3' => 128_000,
             'qwen2.5' => 128_000,
@@ -132,8 +183,6 @@ module Legion
             'snowflake' => 512,
             'bge' => 512
           }.freeze
-
-          private
 
           def resolve_models(live)
             if live

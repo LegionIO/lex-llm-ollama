@@ -90,9 +90,10 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     stub_model_discovery
 
     models = provider.list_models
+    provider.discover_offerings(live: true)
 
     expect(registry_publisher).to have_received(:publish_models_async)
-      .with(models, readiness: hash_including(provider: :ollama, live: false))
+      .with([models.first], readiness: hash_including(provider: :ollama, live: true))
   end
 
   it 'does not probe Ollama for uncached non-live offerings reads' do

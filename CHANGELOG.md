@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.21] - 2026-06-20
+
+### Fixed
+- Stop bulk-publishing Ollama model availability from `list_models`; discovery now emits one registry event per seen model from the shared `lex-llm` policy-filter path so blocked models stay observable without duplicate publishes.
+
 ## [0.2.20] - 2026-06-20
 
 ### Changed
