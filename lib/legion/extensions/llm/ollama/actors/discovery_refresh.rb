@@ -94,7 +94,10 @@ module Legion
               adapter = instance[:adapter]
               return unless adapter.respond_to?(:discover_offerings)
 
-              Array(adapter.discover_offerings(live: true)).each do |offering|
+              Array(adapter.discover_offerings(live: true)).each do |raw_offering|
+                offering = offering_to_hash(raw_offering)
+                next unless offering
+
                 model = offering[:model] || offering['model']
                 next unless model
 
@@ -104,8 +107,18 @@ module Legion
               end
             end
 
+            def offering_to_hash(offering)
+              return nil if offering.nil?
+              return offering if offering.is_a?(Hash)
+
+              hash = offering.to_h
+              hash[:type] ||= hash[:usage_type]
+              hash[:enabled] = offering.respond_to?(:enabled?) ? offering.enabled? : true
+              hash
+            end
+
             def build_lane(offering, instance)
-              instance_id  = instance[:instance] || instance[:instance_id]
+              instance_id  = instance[:instance] || instance[:instance_id] || instance[:id]
               raw_tier     = offering[:tier] || :local
               offer_type   = offering[:type]
               type         = %i[embed embedding].include?(offer_type) ? :embedding : :inference
