@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.2.22] - 2026-06-20
+
+### Fixed
+- Stub shared registry publishing through `RegistryPublisher#schedule` in specs so async availability-event coverage stays stable after the shared publisher moved off raw `Thread.new`.
+
+## [0.2.21] - 2026-06-20
+
+### Fixed
+- Stop bulk-publishing Ollama model availability from `list_models`; discovery now emits one registry event per seen model from the shared `lex-llm` policy-filter path so blocked models stay observable without duplicate publishes.
+
+## [0.2.20] - 2026-06-20
+
+### Changed
+- Slow the live discovery refresh cadence from 60 seconds to 300 seconds for Ollama instances; `extensions.llm.ollama.discovery_interval` still overrides the default.
+
+## [0.2.19] - 2026-06-20
+
+### Fixed
+- Route Ollama capability overrides through the shared `lex-llm` provider contract and preserve the canonical singular `:embedding` capability on embedding offerings.
+
+## [0.2.18] - 2026-06-19
+
+### Changed
+- Adopt `Legion::Extensions::Llm::Inventory::ScopedRefresher` mixin (lex-llm 0.6.0). Discovery
+  refresh actors now write directly to the live `Inventory` catalog via `Inventory.write_lane`.
+- Pin `lex-llm >= 0.6.0` and `legion-llm >= 0.14.0` in gemspec.
+- Standard `weight: 100` default added to provider instance settings schema.
+
 ## 0.2.17 - 2026-06-16
 
 - dependency updates, code quality improvements

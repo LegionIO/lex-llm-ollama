@@ -90,9 +90,10 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     stub_model_discovery
 
     models = provider.list_models
+    provider.discover_offerings(live: true)
 
     expect(registry_publisher).to have_received(:publish_models_async)
-      .with(models, readiness: hash_including(provider: :ollama, live: false))
+      .with([models.first], readiness: hash_including(provider: :ollama, live: true))
   end
 
   it 'does not probe Ollama for uncached non-live offerings reads' do
@@ -117,10 +118,19 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(offering.to_h).to include(instance_id: :fleet_node, transport: :rabbitmq, tier: :fleet)
   end
 
+  it 'preserves embedding capability on embedding offerings' do
+    offering = provider.send(:offering_from_model, nomic_embed_model)
+
+    expect(offering.capabilities).to include(:embedding)
+    expect(offering.capabilities).not_to include(:streaming)
+  end
+
   it 'marks offerings discovery fallback exceptions as handled' do
     stub_cached_offering_failure
 
-    expect(provider.discover_offerings).to eq([])
+    offerings = provider.discover_offerings
+
+    expect(offerings.map(&:model)).to eq(['qwen3.6:27b'])
   end
 
   it 'annotates offerings with loaded: true for running models' do
@@ -233,7 +243,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     events = []
     allow(publisher).to receive(:publishing_available?).and_return(true)
     allow(publisher).to receive(:publish_event) { |event| events << event }
-    allow(Thread).to receive(:new).and_yield
+    allow(publisher).to receive(:schedule).and_yield
     publisher.publish_models_async(models, readiness:)
     events
   end
