@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.23] - 2026-07-05
+
+### Changed
+- Stop_reason mapping now uses the shared `Legion::Extensions::Llm::StopReasonMapping` mixin from lex-llm (>= 0.6.9) instead of a local `OLLAMA_STOP_REASON_MAP` (a copy of the same drifting 3-entry map vLLM carried). The shared vocabulary maps `tool_calls`/`tool_use`/`function_call` to `:tool_use` (plus `stop`/`end_turn`/`eos`, `length`/`max_tokens`, `stop_sequence`, `content_filter`) and is inherited by every provider so it no longer drifts per gem. Ollama's `done_reason`-to-stop_reason resolution is unchanged in behavior.
+
 ## [0.2.22] - 2026-06-20
 
 ### Fixed
