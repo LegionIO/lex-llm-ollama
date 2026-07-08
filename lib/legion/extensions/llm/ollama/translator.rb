@@ -21,13 +21,10 @@ module Legion
         # - assistant_prefill: false — Ollama does not support assistant prefill.
         class Translator
           include Legion::Logging::Helper
+          # Shared stop_reason vocabulary. Ollama returns structured tool_calls and
+          # OpenAI-style done_reason strings; inherits the common map.
+          include Legion::Extensions::Llm::StopReasonMapping
 
-          # Ollama-specific stop_reason mapping (done_reason field).
-          OLLAMA_STOP_REASON_MAP = {
-            'stop' => :end_turn,
-            'tool_use' => :tool_use,
-            'length' => :max_tokens
-          }.freeze
           FALLBACK_STOP_REASON = :end_turn
 
           # G18 parameter mapping: canonical params -> Ollama options keys.
@@ -392,7 +389,7 @@ module Legion
 
           def map_stop_reason(done_reason, done = nil)
             if done_reason
-              OLLAMA_STOP_REASON_MAP.fetch(done_reason.to_s, FALLBACK_STOP_REASON)
+              stop_reason_lookup(done_reason) || FALLBACK_STOP_REASON
             elsif done
               FALLBACK_STOP_REASON
             end
