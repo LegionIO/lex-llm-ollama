@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.24] - 2026-07-24
+
+### Fixed
+- **Translator propagates `done_reason` and usage through content chunks.** When ollama sends `done: true` on a chunk that also has content, the stop_reason and usage were previously lost. Now extracts them before branching and passes through to whatever chunk type is emitted.
+
 ## [0.2.23] - 2026-07-05
 
 ### Changed
