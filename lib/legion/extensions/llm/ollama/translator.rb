@@ -417,16 +417,24 @@ module Legion
             done_reason = data[:done_reason] || data['done_reason']
             request_id = data[:request_id] || data['request_id'] || data[:id] || data['id']
 
+            chunk_stop_reason = done_reason ? map_stop_reason(done_reason, done) : nil
+            chunk_usage = done ? build_chunk_usage(data) : nil
+
             # Tool call delta
             tool_calls = message[:tool_calls] || message['tool_calls']
-            return build_tool_call_chunk(tool_calls, request_id) unless Array(tool_calls).empty?
+            unless Array(tool_calls).empty?
+              return build_tool_call_chunk(tool_calls, request_id,
+                                           stop_reason: chunk_stop_reason, usage: chunk_usage)
+            end
 
             # Thinking delta
             thinking_content = message[:thinking] || message['thinking']
             unless thinking_content.to_s.empty?
               return Canonical::Chunk.thinking_delta(
                 delta: thinking_content.to_s,
-                request_id: request_id
+                request_id: request_id,
+                stop_reason: chunk_stop_reason,
+                usage: chunk_usage
               )
             end
 
@@ -435,7 +443,9 @@ module Legion
             unless content.to_s.empty?
               return Canonical::Chunk.text_delta(
                 delta: content.to_s,
-                request_id: request_id
+                request_id: request_id,
+                stop_reason: chunk_stop_reason,
+                usage: chunk_usage
               )
             end
 
@@ -445,20 +455,22 @@ module Legion
             nil
           end
 
-          def build_done_chunk(data, done_reason, request_id)
-            usage = Canonical::Usage.from_hash({
-                                                 input_tokens: data[:prompt_eval_count] || data['prompt_eval_count'],
-                                                 output_tokens: data[:eval_count] || data['eval_count']
-                                               })
+          def build_chunk_usage(data)
+            Canonical::Usage.from_hash({
+                                         input_tokens: data[:prompt_eval_count] || data['prompt_eval_count'],
+                                         output_tokens: data[:eval_count] || data['eval_count']
+                                       })
+          end
 
+          def build_done_chunk(data, done_reason, request_id)
             Canonical::Chunk.done(
               request_id: request_id,
-              usage: usage,
+              usage: build_chunk_usage(data),
               stop_reason: map_stop_reason(done_reason, true)
             )
           end
 
-          def build_tool_call_chunk(tool_calls, request_id)
+          def build_tool_call_chunk(tool_calls, request_id, stop_reason: nil, usage: nil)
             first_call = tool_calls.first
             first_call = first_call.transform_keys(&:to_sym) if first_call.is_a?(Hash)
             function = first_call[:function] || first_call['function'] || {}
@@ -473,7 +485,9 @@ module Legion
 
             Canonical::Chunk.tool_call_delta(
               tool_call: tc,
-              request_id: request_id
+              request_id: request_id,
+              stop_reason: stop_reason,
+              usage: usage
             )
           end
 
