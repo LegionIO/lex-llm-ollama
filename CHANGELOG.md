@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.25] - 2026-08-04
+
+### Changed
+- Prepare the Ollama provider baseline for a patch release.
+
 ## [0.2.24] - 2026-07-24
 
 ### Fixed
