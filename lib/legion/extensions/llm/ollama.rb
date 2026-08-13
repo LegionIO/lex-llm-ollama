@@ -23,7 +23,6 @@ module Legion
             family: PROVIDER_FAMILY,
             instance: {
               endpoint: 'http://127.0.0.1:11434',
-              default_model: 'qwen3.5:latest',
               tier: :local,
               transport: :http,
               credentials: {},

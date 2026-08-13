@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0] - 2026-08-13
+
+### Changed
+- **SSOT v3 provider migration.** Replace legacy `ScopedRefresher`/`Legion::LLM::Call::Registry` discovery with direct `Inventory::Publisher` claim/activate/replace lifecycle using the lex-llm 0.7.0 runtime contract.
+- Discovery actor now claims exact Ollama instances, builds complete `OfferingDraft` snapshots from `/api/tags` and `/api/show`, and probes readiness via `/api/tags` (non-inference, no model load).
+- Per-model operation evidence: chat/stream_chat always supported, embed supported only for embedding models, image/transcribe/translate/speak/moderate unsupported, count_tokens unknown.
+- Per-model capability evidence from `/api/show` response (tools, thinking, vision) with honest unknown when unavailable.
+- Remove `default_model: 'qwen3.5:latest'` from settings. Omitted model reaches the router unconstrained; provider invocation receives the exact selected model.
+- Stable InstanceKey derivation: `host:port` from the configured endpoint URL.
+- Normalized dispatch errors: connection failure stays `connection_failure`, 503 stays `overloaded`, timeouts stay `timeout`. No raw status code produces `instance_unavailable`.
+- Graceful shutdown removes all claimed instances.
+- Raise gemspec floor to `lex-llm >= 0.7.0`.
+
+### Added
+- `OllamaCallable` wrapper implementing `disconnect` and `normalize_dispatch_error(error:)` for the SSOT callable contract.
+- SSOT v3 conformance spec exercising shared provider examples.
+
 ## [0.2.25] - 2026-08-04
 
 ### Changed
