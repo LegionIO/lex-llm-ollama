@@ -26,7 +26,7 @@ module Legion
               tier: :local,
               transport: :http,
               credentials: {},
-              usage: { inference: true, embedding: true, image: false },
+              usage: { inference: true, image: false },
               limits: { concurrency: 1 },
               fleet: {
                 enabled: false,

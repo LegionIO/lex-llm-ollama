@@ -16,7 +16,7 @@ end
 
 require 'legion/extensions/llm/ollama/actors/fleet_worker'
 
-RSpec.describe Legion::Extensions::Llm::Ollama::Actor::FleetWorker do # rubocop:disable RSpec/SpecFilePathFormat
+RSpec.describe Legion::Extensions::Llm::Ollama::Actor::FleetWorker do
   subject(:actor) { described_class.new }
 
   it 'uses the provider-owned fleet runner' do

@@ -39,8 +39,6 @@ end
 actor_path = File.expand_path('../../../../lib/legion/extensions/llm/ollama/actors/discovery_refresh.rb', __dir__)
 load actor_path
 
-# rubocop:disable RSpec/MultipleMemoizedHelpers
-
 # Test-local callable extending OllamaCallable with dispatch operations
 # and inference call tracking for conformance assertions.
 class TrackingOllamaCallable < Legion::Extensions::Llm::Ollama::Actor::OllamaCallable
@@ -51,26 +49,31 @@ class TrackingOllamaCallable < Legion::Extensions::Llm::Ollama::Actor::OllamaCal
     @call_count = 0
   end
 
-  def chat(messages:, model:, **) # rubocop:disable Lint/UnusedMethodArgument -- callable contract
+  def chat(model:, **)
     @call_count += 1
     { role: 'assistant', content: 'test response', model: model }
   end
 
-  def stream_chat(messages:, model:, **) # rubocop:disable Lint/UnusedMethodArgument -- callable contract
+  def stream_chat(model:, **)
     @call_count += 1
     { role: 'assistant', content: 'streamed response', model: model }
   end
 
-  def embed(text:, model:, **) # rubocop:disable Lint/UnusedMethodArgument -- callable contract
+  def embed(model:, **)
     @call_count += 1
     { embedding: [0.1, 0.2, 0.3], model: model }
   end
 
-  def count_tokens(messages:, model:, **) # rubocop:disable Lint/UnusedMethodArgument -- callable contract
+  def count_tokens(model:, **)
     @call_count += 1
     { token_count: 42, model: model }
   end
 end
+
+# Synthetic error used only for SSOT v3 contract testing.
+# Ollama has no wire-level instance_unavailable dispatch signal; this
+# class exercises the shared contract example that proves instance isolation.
+class OllamaExplicitServiceGoneSignal < StandardError; end
 
 # Harness class for Ollama SSOT v3 conformance testing.
 class OllamaSsotHarness
@@ -121,16 +124,29 @@ class OllamaSsotHarness
   end
 
   def normalize_dispatch_error(error:)
+    # OllamaExplicitServiceGoneSignal is the synthetic contract-test stand-in
+    # for an explicit Ollama service-unavailable response (which production
+    # Ollama endpoints do not currently produce via dispatch).
+    # All real transient errors (connection failure, timeout, 5xx) remain
+    # request-local per §8 and are passed directly to the callable.
+    if error.is_a?(OllamaExplicitServiceGoneSignal)
+      return Legion::Extensions::Llm::Routing::ProviderOutcome.new(
+        kind: :instance_unavailable, reason: error.message.to_s
+      )
+    end
+
     callable = build_callable(instance_config: instance_configs.first)
-    outcome = callable.normalize_dispatch_error(error: error)
-    apply_ollama_escalation(outcome: outcome, error: error)
+    callable.normalize_dispatch_error(error: error)
   end
 
   def instance_unavailable_error
-    # Ollama does NOT produce a distinct instance-unavailable signal.
-    # Connection failure is the closest proxy for a truly dead server,
-    # and the harness escalates it to instance_unavailable.
-    Faraday::ConnectionFailed.new('Connection refused - connect(2) for ollama-server-1.internal:11434')
+    # Synthetic signal for the shared contract example that verifies instance
+    # isolation (§8 / §11 requirement 9). Ollama has no wire-level
+    # instance_unavailable dispatch outcome; only readiness-probe failure marks
+    # an instance globally unavailable in production.
+    OllamaExplicitServiceGoneSignal.new(
+      'Synthetic: explicit Ollama service-unavailable (contract test only)'
+    )
   end
 
   def overloaded_error
@@ -144,18 +160,6 @@ class OllamaSsotHarness
   end
 
   private
-
-  def apply_ollama_escalation(outcome:, error:)
-    # Ollama connection failure = the server process is unreachable.
-    # This is the authoritative signal for instance_unavailable.
-    if outcome.kind == :connection_failure && error.is_a?(Faraday::ConnectionFailed)
-      return Legion::Extensions::Llm::Routing::ProviderOutcome.new(
-        kind: :instance_unavailable, reason: outcome.reason
-      )
-    end
-
-    outcome
-  end
 
   def build_single_offering(model_id:, tier:, now:)
     Legion::Extensions::Llm::Inventory::OfferingDraft.new(
@@ -413,10 +417,10 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
   describe 'startup gating' do
     let(:config) { ssot_harness.instance_configs[0] }
-    let(:instance_id) { ssot_harness.instance_id(instance_config: config) }
     let(:key) do
       Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :ollama, instance_id: instance_id
+        provider_family: :ollama,
+        instance_id: ssot_harness.instance_id(instance_config: config)
       )
     end
     let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama) }
@@ -428,7 +432,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
 
     it 'remains initializing until readiness probe succeeds' do
-      publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
+      publisher.claim_instance(instance_id: key.instance_id, callable: callable, probe_request_handle: coordinator)
 
       snapshot = registry.snapshot
       expect(snapshot.instance(instance_key: key)).to be_nil
@@ -436,9 +440,10 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
 
     it 'stays initializing after an initial readiness failure' do
-      token = publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
-      publisher.readiness_failed(instance_id: instance_id, probe_token: probe,
+      token = publisher.claim_instance(instance_id: key.instance_id, callable: callable,
+                                       probe_request_handle: coordinator)
+      probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
+      publisher.readiness_failed(instance_id: key.instance_id, probe_token: probe,
                                  reason: 'Ollama /api/tags connection failed')
 
       snapshot = registry.snapshot
@@ -447,11 +452,12 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
 
     it 'transitions to available after readiness success' do
-      token = publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
+      token = publisher.claim_instance(instance_id: key.instance_id, callable: callable,
+                                       probe_request_handle: coordinator)
+      probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :local)
       publisher.activate_instance_snapshot(
-        instance_id: instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
+        instance_id: key.instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
       )
 
       snapshot = registry.snapshot
@@ -464,10 +470,10 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
   describe 'readiness probe lifecycle' do
     let(:config) { ssot_harness.instance_configs[0] }
-    let(:instance_id) { ssot_harness.instance_id(instance_config: config) }
     let(:key) do
       Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :ollama, instance_id: instance_id
+        provider_family: :ollama,
+        instance_id: ssot_harness.instance_id(instance_config: config)
       )
     end
     let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama) }
@@ -479,11 +485,12 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
 
     def activate_instance
-      token = publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
+      token = publisher.claim_instance(instance_id: key.instance_id, callable: callable,
+                                       probe_request_handle: coordinator)
+      probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :local)
       publisher.activate_instance_snapshot(
-        instance_id: instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
+        instance_id: key.instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
       )
       token
     end
@@ -491,12 +498,12 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     it 'rejects a stale probe started before a newer failure' do
       token = activate_instance
 
-      stale_probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
-      fresh_probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
+      stale_probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
+      fresh_probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
 
-      publisher.readiness_failed(instance_id: instance_id, probe_token: fresh_probe, reason: 'server down')
+      publisher.readiness_failed(instance_id: key.instance_id, probe_token: fresh_probe, reason: 'server down')
 
-      result = publisher.readiness_succeeded(instance_id: instance_id, probe_token: stale_probe)
+      result = publisher.readiness_succeeded(instance_id: key.instance_id, probe_token: stale_probe)
       expect(result.applied).to be(false)
       expect(result.reason).to eq(:stale_probe)
     end
@@ -509,8 +516,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       )
       expect(registry.snapshot.instance(instance_key: key).availability.state).to eq(:unavailable)
 
-      new_probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
-      publisher.readiness_succeeded(instance_id: instance_id, probe_token: new_probe)
+      new_probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
+      publisher.readiness_succeeded(instance_id: key.instance_id, probe_token: new_probe)
       expect(registry.snapshot.instance(instance_key: key).availability.state).to eq(:available)
     end
   end
@@ -555,10 +562,17 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       expect(registry.snapshot.instance(instance_key: b[:key]).availability.state).to eq(:available)
     end
 
-    it 'normalizes connection failure as instance_unavailable through the harness' do
-      outcome = ssot_harness.normalize_dispatch_error(error: ssot_harness.instance_unavailable_error)
+    it 'connection failure stays request-local and never escalates to instance_unavailable (§8 firewall)' do
+      # §8: connection refusal/reset never mutates global availability.
+      # Ollama has no wire-level instance_unavailable dispatch signal;
+      # only a readiness-probe failure marks an instance globally unavailable.
+      conn_error = Faraday::ConnectionFailed.new(
+        'Connection refused - connect(2) for ollama-server-1.internal:11434'
+      )
+      outcome = ssot_harness.normalize_dispatch_error(error: conn_error)
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
-      expect(outcome.kind).to eq(:instance_unavailable)
+      expect(outcome.kind).to eq(:connection_failure)
+      expect(outcome.kind).not_to eq(:instance_unavailable)
     end
 
     it 'normalizes 503 as overloaded, never as instance_unavailable' do
@@ -734,5 +748,3 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 end
-
-# rubocop:enable RSpec/MultipleMemoizedHelpers

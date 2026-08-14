@@ -183,7 +183,12 @@ module Legion
 
               report_probe_result(instance_id:, probe_token:, readiness:)
             rescue StandardError => e
-              coordinator&.finish_probe rescue nil # rubocop:disable Style/RescueModifier
+              begin
+                coordinator&.finish_probe
+              rescue StandardError => finish_e
+                handle_exception(finish_e, level: :warn, operation: 'ollama.actor.cadence_probe.finish_probe',
+                                           instance_id: instance_id)
+              end
               handle_exception(e, level: :warn, operation: 'ollama.actor.cadence_probe',
                                   instance_id: instance_id)
             end
@@ -205,7 +210,12 @@ module Legion
 
               report_probe_result(instance_id:, probe_token:, readiness:)
             rescue StandardError => e
-              coordinator&.finish_probe(request: request) rescue nil # rubocop:disable Style/RescueModifier
+              begin
+                coordinator&.finish_probe(request: request)
+              rescue StandardError => finish_e
+                handle_exception(finish_e, level: :warn, operation: 'ollama.actor.reactive_probe.finish_probe',
+                                           instance_id: instance_id)
+              end
               handle_exception(e, level: :warn, operation: 'ollama.actor.reactive_probe',
                                   instance_id: instance_id)
             end
@@ -396,7 +406,7 @@ module Legion
               end
             end
 
-            def resolve_vision_evidence(model_name:, model_data:) # rubocop:disable Lint/UnusedMethodArgument -- interface parity with resolve_tools/thinking
+            def resolve_vision_evidence(model_data:, **)
               caps = model_data[:capabilities] || model_data['capabilities']
               if caps.is_a?(Array) && (caps.include?('vision') || caps.include?(:vision))
                 cap_evidence(capability: :vision, status: :supported, source: :provider_catalog)
@@ -559,9 +569,8 @@ module Legion
 
               # Auto-discover local Ollama if no instances configured
               if instances.empty?
-                endpoint = settings[:endpoint] || 'http://127.0.0.1:11434'
                 instances[:local] = {
-                  base_url: endpoint,
+                  base_url: settings[:endpoint],
                   tier: :local
                 }
               end
@@ -624,19 +633,19 @@ module Legion
               @logger.debug { '[ollama][callable] disconnected' }
             end
 
-            def chat(messages:, model:, **) # rubocop:disable Lint/UnusedMethodArgument -- callable contract
+            def chat(model:, **)
               { role: 'assistant', content: 'response', model: model }
             end
 
-            def stream_chat(messages:, model:, **) # rubocop:disable Lint/UnusedMethodArgument -- callable contract
+            def stream_chat(model:, **)
               { role: 'assistant', content: 'streamed', model: model }
             end
 
-            def embed(text:, model:, **) # rubocop:disable Lint/UnusedMethodArgument -- callable contract
+            def embed(model:, **)
               { embedding: [0.0], model: model }
             end
 
-            def count_tokens(messages:, model:, **) # rubocop:disable Lint/UnusedMethodArgument -- callable contract
+            def count_tokens(model:, **)
               { token_count: 0, model: model }
             end
 

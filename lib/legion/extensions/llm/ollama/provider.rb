@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'uri'
 require 'legion/extensions/llm'
 require 'legion/logging/helper'
 
@@ -27,14 +28,17 @@ module Legion
           end
 
           # Capability predicates for Ollama model offerings.
+          # vision?, functions?, and embedding? are not authoritative for every
+          # Ollama model; evidence is derived per-model by the DiscoveryRefresh
+          # actor via /api/tags and /api/show. Unknown returns false here.
           module Capabilities
             module_function
 
             def chat?(_model) = true
             def streaming?(_model) = true
-            def vision?(_model) = true
-            def functions?(_model) = true
-            def embeddings?(_model) = true
+            def vision?(_model) = false
+            def functions?(_model) = false
+            def embedding?(_model) = false
           end
 
           def settings
@@ -46,7 +50,7 @@ module Legion
           end
 
           def api_base
-            resolve_base_url || normalize_url(settings[:base_url] || settings[:endpoint] || 'http://127.0.0.1:11434')
+            resolve_base_url || normalize_url(settings.dig(:instances, :default, :endpoint))
           end
 
           def config_base_url
@@ -72,9 +76,7 @@ module Legion
 
           def readiness(live: false)
             log.debug { "ollama provider checking readiness live=#{live} endpoint=#{api_base}" }
-            super.tap do |metadata|
-              self.class.registry_publisher.publish_readiness_async(metadata) if live
-            end
+            super
           end
 
           def list_models(live: false, **filters)
@@ -127,20 +129,22 @@ module Legion
 
           private
 
-          def discovery_registry_readiness(provider_health, live:)
-            {
-              provider: slug.to_sym,
-              configured: configured?,
-              ready: provider_health[:ready] == true,
-              live: live,
-              health: provider_health
-            }
+          def required_instance_id
+            # Prefer explicit instance_id from provider config.
+            return config.instance_id if config.respond_to?(:instance_id) && config.instance_id
+
+            # Derive a stable instance_id from the endpoint URL so the exact-instance
+            # contract is maintained even on the legacy provider path.
+            # The :default symbol is never substituted; derivation replaces that fallback.
+            uri = URI.parse(api_base.to_s)
+            "#{uri.host || '127.0.0.1'}:#{uri.port || 11_434}"
+          rescue URI::InvalidURIError => e
+            handle_exception(e, level: :warn, operation: 'ollama.provider.derive_instance_id')
+            raise ArgumentError, "[ollama] cannot derive stable instance_id from api_base=#{api_base.inspect}"
           end
 
           def discover_live_offerings(filters, provider_health, live:)
-            readiness = discovery_registry_readiness(provider_health, live:)
             Array(list_models(live:, **filters)).filter_map do |model|
-              self.class.registry_publisher.publish_models_async([model], readiness:)
               next unless model_matches_filters?(model, filters)
               next unless model_allowed?(model.id)
 
@@ -214,7 +218,7 @@ module Legion
                                  end
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :ollama,
-              instance_id: config.respond_to?(:instance_id) ? config.instance_id : :default,
+              instance_id: required_instance_id,
               transport: offering_transport,
               tier: offering_tier,
               model: model_info.id,

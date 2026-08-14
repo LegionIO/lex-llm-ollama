@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.1] - 2026-08-13
+
+### Fixed
+- **§8 health firewall:** Connection failures, timeouts, and 5xx errors stay request-local and never map to `:instance_unavailable`. Only an explicit flat service-unavailable wire signal maps to that outcome.
+- **§9 no `:default` substitution:** `offering_from_model` derives a stable `instance_id` from the configured endpoint URL (`host:port`) instead of substituting the `:default` symbol.
+- **§1 rubocop:disable removed:** All `rubocop:disable` comments removed from source and spec files; underlying causes fixed.
+- **§1 swallowed rescue fixed:** `coordinator.finish_probe` failure now logged with `handle_exception` rather than silently swallowed.
+- **§1 settings path corrected:** `api_base` reads `settings.dig(:instances, :default, :endpoint)` instead of the non-existent top-level `settings[:endpoint]`, preventing invalid base URL construction.
+- **§2/§5 second publication engine removed:** `readiness` and `discover_live_offerings` no longer call `registry_publisher.publish_readiness_async` or `publish_models_async`; the SSOT v3 actor is the sole publication path.
+- **Provider capabilities corrected:** `vision?`, `functions?`, `embedding?` return `false` (not `true`) as the static predicate; evidence-based values are derived per-model by the discovery actor.
+- **Settings `embedding: true` removed:** Blanket embedding capability removed from usage defaults; embedding is declared per-model by the discovery actor based on `/api/tags` family evidence.
+
 ## [0.3.0] - 2026-08-13
 
 ### Changed
