@@ -50,7 +50,7 @@ module Legion
           end
 
           def api_base
-            resolve_base_url || normalize_url(settings.dig(:instances, :default, :endpoint))
+            resolve_base_url || normalize_url(settings[:instances][:default][:endpoint])
           end
 
           def config_base_url

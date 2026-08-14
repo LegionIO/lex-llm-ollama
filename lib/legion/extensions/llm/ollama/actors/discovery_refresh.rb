@@ -251,8 +251,12 @@ module Legion
               response = conn.get('/api/tags')
               build_readiness_from_response(response: response, base_url: base_url)
             rescue Faraday::ConnectionFailed => e
+              handle_exception(e, level: :warn, handled: true, operation: 'ollama.actor.check_readiness',
+                                  base_url: base_url)
               readiness_failure(reason: "Ollama /api/tags connection failed: #{e.message}", error: e)
             rescue StandardError => e
+              handle_exception(e, level: :warn, handled: true, operation: 'ollama.actor.check_readiness',
+                                  base_url: base_url)
               readiness_failure(reason: "Ollama /api/tags error: #{e.message}", error: e)
             end
 
@@ -534,8 +538,9 @@ module Legion
               host = uri.host || '127.0.0.1'
               port = uri.port || 11_434
               "#{host}:#{port}"
-            rescue URI::InvalidURIError
-              'unknown:0'
+            rescue URI::InvalidURIError => e
+              handle_exception(e, level: :warn, operation: 'ollama.actor.extract_host_port', url: url)
+              raise
             end
 
             # -- Graceful shutdown -----------------------------------------------

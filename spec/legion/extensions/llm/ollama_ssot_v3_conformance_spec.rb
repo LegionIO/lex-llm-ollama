@@ -223,9 +223,8 @@ end
 
 RSpec.describe Legion::Extensions::Llm::Ollama do
   let(:ssot_harness) { OllamaSsotHarness.new }
-  let(:registry) { Legion::Extensions::Llm::Inventory::Registry }
 
-  before { registry.reset! }
+  before { Legion::Extensions::Llm::Inventory::Registry.reset! }
 
   it_behaves_like 'an SSOT v3 provider adapter'
 
@@ -290,7 +289,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       a = bring_up_instance(ssot_harness.instance_configs[0])
       b = bring_up_instance(ssot_harness.instance_configs[1])
 
-      snapshot = registry.snapshot
+      snapshot = Legion::Extensions::Llm::Inventory::Registry.snapshot
       lanes_a = snapshot.lanes_for(instance_key: a[:key])
       lanes_b = snapshot.lanes_for(instance_key: b[:key])
 
@@ -304,14 +303,15 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
     it 'reproduces IDs after restart (identity is deterministic from inputs)' do
       config = ssot_harness.instance_configs[0]
+      reg = Legion::Extensions::Llm::Inventory::Registry
       first_run = bring_up_instance(config)
-      first_offering_id = registry.snapshot.offerings_for(instance_key: first_run[:key]).first.offering_id
-      first_lane_id = registry.snapshot.lanes_for(instance_key: first_run[:key]).first.lane_id
+      first_offering_id = reg.snapshot.offerings_for(instance_key: first_run[:key]).first.offering_id
+      first_lane_id = reg.snapshot.lanes_for(instance_key: first_run[:key]).first.lane_id
 
-      registry.reset!
+      reg.reset!
       second_run = bring_up_instance(config)
-      second_offering_id = registry.snapshot.offerings_for(instance_key: second_run[:key]).first.offering_id
-      second_lane_id = registry.snapshot.lanes_for(instance_key: second_run[:key]).first.lane_id
+      second_offering_id = reg.snapshot.offerings_for(instance_key: second_run[:key]).first.offering_id
+      second_lane_id = reg.snapshot.lanes_for(instance_key: second_run[:key]).first.lane_id
 
       expect(second_offering_id).to eq(first_offering_id)
       expect(second_lane_id).to eq(first_lane_id)
@@ -347,9 +347,10 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     it 'preserves offering_id and lane_id when tier changes from local to frontier' do
       config = ssot_harness.instance_configs[0]
       context = bring_up_with_tier(config, tier: :local)
+      reg = Legion::Extensions::Llm::Inventory::Registry
 
-      before_offering = registry.snapshot.offerings_for(instance_key: context[:key]).first
-      before_lane = registry.snapshot.lanes_for(instance_key: context[:key]).first
+      before_offering = reg.snapshot.offerings_for(instance_key: context[:key]).first
+      before_lane = reg.snapshot.lanes_for(instance_key: context[:key]).first
 
       frontier_drafts = ssot_harness.build_offering_drafts(
         instance_config: config, callable: context[:callable], tier: :frontier
@@ -361,8 +362,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
         sequence: 1
       )
 
-      after_offering = registry.snapshot.offerings_for(instance_key: context[:key]).first
-      after_lane = registry.snapshot.lanes_for(instance_key: context[:key]).first
+      after_offering = reg.snapshot.offerings_for(instance_key: context[:key]).first
+      after_lane = reg.snapshot.lanes_for(instance_key: context[:key]).first
 
       expect(after_offering.offering_id).to eq(before_offering.offering_id)
       expect(after_lane.lane_id).to eq(before_lane.lane_id)
@@ -375,8 +376,9 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
   describe 'operation evidence controls' do
     let(:config) { ssot_harness.instance_configs[0] }
     let(:callable) { ssot_harness.build_callable(instance_config: config) }
-    let(:drafts) { ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :local) }
-    let(:offering) { drafts.first }
+    let(:offering) do
+      ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :local).first
+    end
 
     it 'marks chat as supported' do
       expect(offering.operation_evidence[:chat].status).to eq(:supported)
@@ -425,42 +427,44 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
     let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama) }
     let(:callable) { ssot_harness.build_callable(instance_config: config) }
-    let(:coordinator) do
+
+    def build_coordinator
       Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
         instance_key: key, enqueue: ->(**) { true }
       )
     end
 
     it 'remains initializing until readiness probe succeeds' do
-      publisher.claim_instance(instance_id: key.instance_id, callable: callable, probe_request_handle: coordinator)
+      publisher.claim_instance(instance_id: key.instance_id, callable: callable,
+                               probe_request_handle: build_coordinator)
 
-      snapshot = registry.snapshot
+      snapshot = Legion::Extensions::Llm::Inventory::Registry.snapshot
       expect(snapshot.instance(instance_key: key)).to be_nil
       expect(snapshot.publication_status(instance_key: key).state).to eq(:initializing)
     end
 
     it 'stays initializing after an initial readiness failure' do
       token = publisher.claim_instance(instance_id: key.instance_id, callable: callable,
-                                       probe_request_handle: coordinator)
+                                       probe_request_handle: build_coordinator)
       probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
       publisher.readiness_failed(instance_id: key.instance_id, probe_token: probe,
                                  reason: 'Ollama /api/tags connection failed')
 
-      snapshot = registry.snapshot
+      snapshot = Legion::Extensions::Llm::Inventory::Registry.snapshot
       expect(snapshot.instance(instance_key: key)).to be_nil
       expect(snapshot.publication_status(instance_key: key).state).to eq(:initializing)
     end
 
     it 'transitions to available after readiness success' do
       token = publisher.claim_instance(instance_id: key.instance_id, callable: callable,
-                                       probe_request_handle: coordinator)
+                                       probe_request_handle: build_coordinator)
       probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :local)
       publisher.activate_instance_snapshot(
         instance_id: key.instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
       )
 
-      snapshot = registry.snapshot
+      snapshot = Legion::Extensions::Llm::Inventory::Registry.snapshot
       expect(snapshot.instance(instance_key: key).availability.state).to eq(:available)
       expect(snapshot.publication_status(instance_key: key).state).to eq(:complete)
     end
@@ -478,7 +482,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
     let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama) }
     let(:callable) { ssot_harness.build_callable(instance_config: config) }
-    let(:coordinator) do
+
+    def build_coordinator
       Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
         instance_key: key, enqueue: ->(**) { true }
       )
@@ -486,7 +491,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
     def activate_instance
       token = publisher.claim_instance(instance_id: key.instance_id, callable: callable,
-                                       probe_request_handle: coordinator)
+                                       probe_request_handle: build_coordinator)
       probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :local)
       publisher.activate_instance_snapshot(
@@ -510,15 +515,16 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
     it 'recovers an unavailable instance after a valid probe succeeds' do
       token = activate_instance
+      reg = Legion::Extensions::Llm::Inventory::Registry
 
-      registry.dispatch_instance_unavailable(
+      reg.dispatch_instance_unavailable(
         instance_key: key, publisher_token_id: token.publisher_token_id, reason: 'connection refused'
       )
-      expect(registry.snapshot.instance(instance_key: key).availability.state).to eq(:unavailable)
+      expect(reg.snapshot.instance(instance_key: key).availability.state).to eq(:unavailable)
 
       new_probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
       publisher.readiness_succeeded(instance_id: key.instance_id, probe_token: new_probe)
-      expect(registry.snapshot.instance(instance_key: key).availability.state).to eq(:available)
+      expect(reg.snapshot.instance(instance_key: key).availability.state).to eq(:available)
     end
   end
 
@@ -551,15 +557,16 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     it 'marks only one instance unavailable without affecting the other' do
       a = bring_up(ssot_harness.instance_configs[0])
       b = bring_up(ssot_harness.instance_configs[1])
+      reg = Legion::Extensions::Llm::Inventory::Registry
 
-      registry.dispatch_instance_unavailable(
+      reg.dispatch_instance_unavailable(
         instance_key: a[:key],
         publisher_token_id: a[:token].publisher_token_id,
         reason: 'connection refused to ollama-server-1'
       )
 
-      expect(registry.snapshot.instance(instance_key: a[:key]).availability.state).to eq(:unavailable)
-      expect(registry.snapshot.instance(instance_key: b[:key]).availability.state).to eq(:available)
+      expect(reg.snapshot.instance(instance_key: a[:key]).availability.state).to eq(:unavailable)
+      expect(reg.snapshot.instance(instance_key: b[:key]).availability.state).to eq(:available)
     end
 
     it 'connection failure stays request-local and never escalates to instance_unavailable (§8 firewall)' do

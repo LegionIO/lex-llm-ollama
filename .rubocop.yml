@@ -32,8 +32,6 @@ RSpec/MultipleExpectations:
   Enabled: false
 RSpec/ExampleLength:
   Enabled: false
-RSpec/MultipleMemoizedHelpers:
-  Max: 7
 RSpec/LeakyConstantDeclaration:
   Enabled: false
 RSpec/InstanceVariable:

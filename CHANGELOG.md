@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.2] - 2026-08-13
+
+### Fixed
+- **§1 settings access via .dig:** `api_base` now reads `settings[:instances][:default][:endpoint]` using bracket notation instead of the prohibited `.dig` form.
+- **§9 default model substitution removed:** `translator.rb` `render_request` no longer falls back to `'default'` when model is absent from request metadata; the field is omitted (compacted) so the exact selected model must be provided by the executor.
+- **§1 swallowed rescue fixed:** `extract_host_port` in the discovery actor now calls `handle_exception` and re-raises on `URI::InvalidURIError` instead of silently returning `'unknown:0'`.
+- **§1 swallowed rescue fixed:** `check_readiness` rescues now call `handle_exception` (with `handled: true`) before constructing the `ReadinessResult`, preserving the log audit trail.
+- **§1 cop strictness reverted:** `RSpec/MultipleMemoizedHelpers: Max: 7` removed from `.rubocop.yml`; conformance spec refactored to comply with the default maximum of 5 memoized helpers per context.
+
 ## [0.3.1] - 2026-08-13
 
 ### Fixed
