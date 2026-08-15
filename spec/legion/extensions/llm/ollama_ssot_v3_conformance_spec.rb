@@ -2,7 +2,6 @@
 
 require 'spec_helper'
 require 'faraday'
-require 'digest'
 require 'uri'
 
 require 'legion/extensions/llm/inventory/publisher'
@@ -17,98 +16,132 @@ require 'legion/extensions/llm/capabilities'
 require 'legion/extensions/llm/fleet/worker_execution'
 require 'legion/extensions/llm/fleet/protocol'
 
-# Stub the actor runtime so discovery_refresh.rb loads the OllamaCallable class.
-module Legion
-  module Extensions
-    module Actors
-      unless const_defined?(:Every, false)
-        class Every
-          def self.every_seconds = 300
-        end
-      end
-    end
+# OllamaCallable is loaded via spec_helper → ollama.rb → discovery_refresh.rb
+# (spec_helper stubs the LegionIO actor runtime before loading ollama)
 
-    module Helpers
-      module Lex; end unless const_defined?(:Lex, false)
-    end
-  end
-end
+# ── RecordingOllamaProvider ───────────────────────────────────────────────────
+# Test-local stand-in for the per-instance Ollama::Provider that the
+# PRODUCTION OllamaCallable delegates its fleet dispatch ops to. It replaces
+# the I/O boundary (the Provider's HTTP client) so conformance tests run
+# offline; the callable under test is the real production class, and its
+# dispatch methods are the real delegation code.
+class RecordingOllamaProvider
+  attr_reader :calls, :disconnected
 
-# Force re-evaluation since spec_helper already loaded the file (which returned
-# early because Actors::Every wasn't defined at that point).
-actor_path = File.expand_path('../../../../lib/legion/extensions/llm/ollama/actors/discovery_refresh.rb', __dir__)
-load actor_path
-
-# Test-local callable extending OllamaCallable with dispatch operations
-# and inference call tracking for conformance assertions.
-class TrackingOllamaCallable < Legion::Extensions::Llm::Ollama::Actor::OllamaCallable
-  attr_reader :call_count
-
-  def initialize(instance_cfg:, logger:)
-    super
-    @call_count = 0
+  def initialize
+    @calls = []
+    @disconnected = false
   end
 
-  def chat(model:, **)
-    @call_count += 1
+  def call_count = @calls.size
+
+  def chat(messages:, model:, **rest)
+    record(:chat, messages: messages, model: model, **rest)
     { role: 'assistant', content: 'test response', model: model }
   end
 
-  def stream_chat(model:, **)
-    @call_count += 1
+  def stream_chat(messages:, model:, **rest, &)
+    record(:stream_chat, messages: messages, model: model, **rest)
     { role: 'assistant', content: 'streamed response', model: model }
   end
 
-  def embed(model:, **)
-    @call_count += 1
+  def embed(text:, model:, **rest)
+    record(:embed, text: text, model: model, **rest)
     { embedding: [0.1, 0.2, 0.3], model: model }
   end
 
-  def count_tokens(model:, **)
-    @call_count += 1
+  def count_tokens(messages:, model:, **rest)
+    record(:count_tokens, messages: messages, model: model, **rest)
     { token_count: 42, model: model }
+  end
+
+  def disconnect
+    @disconnected = true
+  end
+
+  private
+
+  def record(operation, **args)
+    @calls << { operation: operation, **args }
   end
 end
 
-# Synthetic error used only for SSOT v3 contract testing.
-# Ollama has no wire-level instance_unavailable dispatch signal; this
-# class exercises the shared contract example that proves instance isolation.
+# Synthetic error used only for the SSOT v3 contract test that verifies
+# instance isolation. Ollama has no wire-level instance_unavailable dispatch
+# signal (a dead server drops the connection — the :connection_failure
+# down-signal the readiness probe turns into an availability transition);
+# this class exercises the shared contract example with the one outcome kind
+# that performs the global transition.
 class OllamaExplicitServiceGoneSignal < StandardError; end
 
-# Harness class for Ollama SSOT v3 conformance testing.
+# ── OllamaSsotHarness ─────────────────────────────────────────────────────────
+# Harness class for Ollama SSOT v3 conformance testing. Implements the full
+# interface required by the shared conformance examples without touching any
+# external service. build_callable returns the PRODUCTION OllamaCallable
+# (dispatch ops delegate to an injected RecordingOllamaProvider in place of
+# the real per-instance Provider's HTTP client), and identity/draft building
+# delegate to the PRODUCTION methods — the harness duplicates no builder
+# logic (drift would mask production bugs).
 class OllamaSsotHarness
+  # 127.0.0.1 ports with nothing listening: the draft builder's per-model
+  # /api/show fetch fails fast (connection refused, no DNS) and degrades to
+  # absent detail evidence, so drafts are built by the production builder
+  # without external network dependencies.
   INSTANCE_CONFIGS = [
     {
-      base_url: 'http://ollama-server-1.internal:11434',
+      base_url: 'http://127.0.0.1:11435',
       tier: :local
     }.freeze,
     {
-      base_url: 'http://ollama-server-2.internal:11435',
+      base_url: 'http://127.0.0.1:11436',
       tier: :local
     }.freeze
   ].freeze
 
+  def initialize
+    @provider_by_callable = {}
+    @logger = Logger.new(File::NULL)
+  end
+
   def provider_family = :ollama
   def instance_configs = INSTANCE_CONFIGS
 
+  # Delegates to the actor's PRODUCTION identity derivation.
   def instance_id(instance_config:)
-    base_url = instance_config[:base_url] || instance_config[:endpoint] || 'http://127.0.0.1:11434'
-    uri = URI.parse(base_url.to_s)
-    host = uri.host || '127.0.0.1'
-    port = uri.port || 11_434
-    "#{host}:#{port}"
-  rescue URI::InvalidURIError
-    'unknown:0'
+    Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh
+      .allocate.send(:derive_instance_id, instance_cfg: instance_config)
   end
 
   def build_callable(instance_config:)
-    TrackingOllamaCallable.new(instance_cfg: instance_config, logger: Logger.new(File::NULL))
+    provider = RecordingOllamaProvider.new
+    callable = Legion::Extensions::Llm::Ollama::Actor::OllamaCallable.new(
+      instance_cfg: instance_config, logger: @logger, provider: provider
+    )
+    @provider_by_callable[callable] = provider
+    callable
   end
 
-  def build_offering_drafts(tier: :local, **)
-    now = Time.now.freeze
-    model_id = 'qwen3:8b'
-    [build_single_offering(model_id: model_id, tier: tier, now: now)]
+  # Delegates to the actor's PRODUCTION draft builder (ModelDiscovery),
+  # not a spec-local duplicate of the evidence construction.
+  def build_offering_drafts(instance_config:, tier: :local, **)
+    actor = Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh.allocate
+    cfg = instance_config.merge(tier: tier)
+    instance_id = actor.send(:derive_instance_id, instance_cfg: cfg)
+    instance_key = actor.send(:build_instance_key, instance_id: instance_id)
+    [
+      actor.send(
+        :build_offering_draft,
+        model_name: 'qwen3:8b',
+        model_data: {
+          name: 'qwen3:8b',
+          digest: 'sha256:specdigest',
+          details: { family: 'qwen3' },
+          size: 4_700_000_000
+        },
+        instance_cfg: cfg,
+        instance_key: instance_key
+      )
+    ]
   end
 
   def safe_readiness(instance_config:, **)
@@ -120,115 +153,72 @@ class OllamaSsotHarness
   end
 
   def inference_call_count(callable:)
-    callable.respond_to?(:call_count) ? callable.call_count : 0
+    @provider_by_callable[callable]&.call_count || 0
   end
 
   def normalize_dispatch_error(error:)
-    # OllamaExplicitServiceGoneSignal is the synthetic contract-test stand-in
-    # for an explicit Ollama service-unavailable response (which production
-    # Ollama endpoints do not currently produce via dispatch).
-    # All real transient errors (connection failure, timeout, 5xx) remain
-    # request-local per §8 and are passed directly to the callable.
+    # The synthetic service-gone signal is the contract-test stand-in for the
+    # one outcome that performs the global unavailable transition. Every real
+    # error shape (Llm::*Error from the ErrorMiddleware, raw Faraday transport
+    # errors) is classified by the PRODUCTION callable.
     if error.is_a?(OllamaExplicitServiceGoneSignal)
       return Legion::Extensions::Llm::Routing::ProviderOutcome.new(
         kind: :instance_unavailable, reason: error.message.to_s
       )
     end
 
-    callable = build_callable(instance_config: instance_configs.first)
-    callable.normalize_dispatch_error(error: error)
+    build_callable(instance_config: instance_configs.first).normalize_dispatch_error(error: error)
   end
 
+  # ── Real Faraday error shapes ──────────────────────────────────────────────
+  # Faraday 2.x builds error.response as a Faraday::Env (a Struct, not a
+  # Hash). These helpers construct errors the way Faraday itself does so the
+  # conformance suite exercises the production shape, not a hand-rolled Hash.
+
+  # Returns a Faraday::ServerError whose response is a Faraday::Env — the
+  # shape a real Faraday 2.x error carries.
+  def faraday_server_error(status:, body:)
+    env = Faraday::Env.new
+    env.status = status
+    env.reason_phrase = 'Service Unavailable'
+    env.response_body = body
+    Faraday::ServerError.new(env)
+  end
+
+  def faraday_client_error(status:, body:)
+    env = Faraday::Env.new
+    env.status = status
+    env.response_body = body
+    Faraday::ClientError.new(env)
+  end
+
+  # Ollama emits no explicit flat instance-unavailable dispatch signal; this
+  # synthetic signal exercises the shared contract example that verifies
+  # instance isolation (§8 firewall — connection failures stay request-local).
   def instance_unavailable_error
-    # Synthetic signal for the shared contract example that verifies instance
-    # isolation (§8 / §11 requirement 9). Ollama has no wire-level
-    # instance_unavailable dispatch outcome; only readiness-probe failure marks
-    # an instance globally unavailable in production.
     OllamaExplicitServiceGoneSignal.new(
       'Synthetic: explicit Ollama service-unavailable (contract test only)'
     )
   end
 
   def overloaded_error
-    response = { status: 503, headers: {}, body: '{"error": "Server busy"}' }
-    Faraday::ServerError.new('the server responded with status 503', response)
+    faraday_server_error(status: 503, body: '{"error": "Server busy"}')
   end
 
   def model_not_ready_error
-    response = { status: 503, headers: {}, body: '{"error": "model is not loaded"}' }
-    Faraday::ServerError.new('the server responded with status 503 - model is not loaded', response)
-  end
-
-  private
-
-  def build_single_offering(model_id:, tier:, now:)
-    Legion::Extensions::Llm::Inventory::OfferingDraft.new(
-      provider_native_key: model_id, model: model_id, tier: tier,
-      operation_evidence: build_operation_evidence(now: now, embed_supported: false),
-      capability_evidence: build_capability_evidence,
-      context_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(
-        status: :known, value: 128_000, source: :provider_catalog
-      ),
-      max_output_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
-      embedding_dimensions_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(
-        status: :unknown, source: :absent
-      ),
-      model_revision_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(
-        status: :unknown, source: :absent
-      ),
-      tokenizer_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
-      quota_domains: {}, metadata: { raw_model: model_id }, publication_source: :provider_catalog
-    )
-  end
-
-  def build_operation_evidence(now:, embed_supported:)
-    embed_status = embed_supported ? :supported : :unsupported
-    {
-      chat: op_evidence(:chat, :supported, now),
-      stream_chat: op_evidence(:stream_chat, :supported, now),
-      embed: op_evidence(:embed, embed_status, now),
-      image: op_evidence(:image, :unsupported, now),
-      transcribe: op_evidence(:transcribe, :unsupported, now),
-      translate: op_evidence(:translate, :unsupported, now),
-      speak: op_evidence(:speak, :unsupported, now),
-      moderate: op_evidence(:moderate, :unsupported, now),
-      count_tokens: op_evidence(:count_tokens, :unknown, now)
-    }
-  end
-
-  def op_evidence(operation, status, observed_at)
-    source = status == :unknown ? :default_false : :provider_implementation
-    Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-      operation: operation, status: status, source: source, observed_at: observed_at
-    )
-  end
-
-  def build_capability_evidence
-    {
-      completion: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :completion, status: :supported, source: :provider_implementation, observed_at: Time.now
-      ),
-      streaming: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :streaming, status: :supported, source: :provider_implementation, observed_at: Time.now
-      ),
-      tools: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :tools, status: :unknown, source: :default_false, observed_at: Time.now
-      ),
-      thinking: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :thinking, status: :unknown, source: :default_false, observed_at: Time.now
-      )
-    }
+    faraday_server_error(status: 503, body: '{"error": "model is not loaded"}')
   end
 end
 
 RSpec.describe Legion::Extensions::Llm::Ollama do
   let(:ssot_harness) { OllamaSsotHarness.new }
+  let(:registry) { Legion::Extensions::Llm::Inventory::Registry }
 
-  before { Legion::Extensions::Llm::Inventory::Registry.reset! }
+  before { registry.reset! }
 
   it_behaves_like 'an SSOT v3 provider adapter'
 
-  # -- Ollama-specific identity derivation ------------------------------------
+  # ─── Ollama-specific identity derivation ────────────────────────────────────
 
   describe 'instance identity derivation' do
     it 'derives instance_id as host:port from endpoint URL' do
@@ -253,13 +243,13 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       expect(id_a).to eq(id_b)
     end
 
-    it 'defaults to 127.0.0.1:11434 when no endpoint configured' do
-      config = {}
-      expect(ssot_harness.instance_id(instance_config: config)).to eq('127.0.0.1:11434')
+    it 'raises on a config with no endpoint (no fallback identity)' do
+      expect { ssot_harness.instance_id(instance_config: {}) }
+        .to raise_error(ArgumentError, /no endpoint/)
     end
   end
 
-  # -- Two servers with same model = separate lanes ---------------------------
+  # ─── Two servers with same model = separate lanes ───────────────────────────
 
   describe 'two Ollama servers serving the same model' do
     def bring_up_instance(config, tier: :local)
@@ -318,7 +308,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # -- Tier change does NOT change lane/offering identity ---------------------
+  # ─── Tier change does NOT change lane/offering identity ─────────────────────
 
   describe 'tier change and identity preservation' do
     def bring_up_with_tier(config, tier:)
@@ -371,7 +361,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # -- Operation evidence controls -------------------------------------------
+  # ─── Operation evidence controls ────────────────────────────────────────────
 
   describe 'operation evidence controls' do
     let(:config) { ssot_harness.instance_configs[0] }
@@ -415,7 +405,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # -- Startup gating --------------------------------------------------------
+  # ─── Startup gating ─────────────────────────────────────────────────────────
 
   describe 'startup gating' do
     let(:config) { ssot_harness.instance_configs[0] }
@@ -426,7 +416,9 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       )
     end
     let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama) }
-    let(:callable) { ssot_harness.build_callable(instance_config: config) }
+
+    # Method (not let) to stay under RSpec/MultipleMemoizedHelpers.
+    def callable = ssot_harness.build_callable(instance_config: config)
 
     def build_coordinator
       Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
@@ -470,7 +462,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # -- Readiness probe lifecycle ---------------------------------------------
+  # ─── Readiness probe lifecycle ──────────────────────────────────────────────
 
   describe 'readiness probe lifecycle' do
     let(:config) { ssot_harness.instance_configs[0] }
@@ -481,7 +473,9 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       )
     end
     let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama) }
-    let(:callable) { ssot_harness.build_callable(instance_config: config) }
+
+    # Method (not let) to stay under RSpec/MultipleMemoizedHelpers.
+    def callable = ssot_harness.build_callable(instance_config: config)
 
     def build_coordinator
       Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
@@ -528,7 +522,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # -- Instance-unavailable isolation ----------------------------------------
+  # ─── Instance-unavailable isolation ─────────────────────────────────────────
 
   describe 'instance-unavailable isolation' do
     def bring_up(config)
@@ -571,10 +565,11 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
     it 'connection failure stays request-local and never escalates to instance_unavailable (§8 firewall)' do
       # §8: connection refusal/reset never mutates global availability.
-      # Ollama has no wire-level instance_unavailable dispatch signal;
-      # only a readiness-probe failure marks an instance globally unavailable.
+      # Ollama's down-signal is the connection failure itself; the readiness
+      # probe turns it into an availability transition — never the dispatch
+      # error classification.
       conn_error = Faraday::ConnectionFailed.new(
-        'Connection refused - connect(2) for ollama-server-1.internal:11434'
+        'Connection refused - connect(2) for 127.0.0.1:11435'
       )
       outcome = ssot_harness.normalize_dispatch_error(error: conn_error)
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
@@ -589,44 +584,72 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # -- Error isolation -------------------------------------------------------
+  # ─── Error isolation (no global poisoning) ──────────────────────────────────
 
   describe 'error isolation (no global poisoning)' do
+    let(:callable) { ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0]) }
+
+    def llm_error(klass, status, body)
+      env = Faraday::Env.new
+      env.status = status
+      env.response_body = body
+      klass.new(env, status.to_s)
+    end
+
     it 'classifies connection failure as connection_failure on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      error = Faraday::ConnectionFailed.new('Connection refused')
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome = callable.normalize_dispatch_error(error: Faraday::ConnectionFailed.new('Connection refused'))
       expect(outcome.kind).to eq(:connection_failure)
     end
 
     it 'classifies timeout as timeout on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      error = Faraday::TimeoutError.new('Net::ReadTimeout')
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome = callable.normalize_dispatch_error(error: Faraday::TimeoutError.new('Net::ReadTimeout'))
       expect(outcome.kind).to eq(:timeout)
     end
 
-    it 'classifies 503 ServerError as overloaded on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      response = { status: 503, headers: {}, body: '' }
-      error = Faraday::ServerError.new('503', response)
-      outcome = callable.normalize_dispatch_error(error: error)
+    it 'classifies 503 ServerError (real Faraday::Env) as overloaded on the callable' do
+      outcome = callable.normalize_dispatch_error(error: ssot_harness.overloaded_error)
       expect(outcome.kind).to eq(:overloaded)
     end
 
-    it 'classifies 429 ClientError as rate_limited on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      response = { status: 429, headers: {}, body: '' }
-      error = Faraday::ClientError.new('429', response)
+    it 'classifies 429 ClientError (real Faraday::Env) as rate_limited on the callable' do
+      error = ssot_harness.faraday_client_error(status: 429, body: '{"error": "rate limit"}')
       outcome = callable.normalize_dispatch_error(error: error)
       expect(outcome.kind).to eq(:rate_limited)
     end
 
+    # D17: production dispatch raises Llm::*Error (the ErrorMiddleware
+    # converts HTTP statuses to Llm classes), NOT raw Faraday. The callable
+    # must classify every Llm error shape — a fall-through to
+    # :provider_error would misclassify 401/403/429/529 and hide the
+    # connection-failure down-signal from the router.
+    def classify_llm_error(error)
+      callable.normalize_dispatch_error(error: error).kind
+    end
+
+    it 'classifies the Llm error shape raised by the ErrorMiddleware (D17)' do
+      llm = Legion::Extensions::Llm
+      expect(classify_llm_error(llm_error(llm::ServiceUnavailableError, 503, 'x'))).to eq(:provider_error)
+      expect(classify_llm_error(llm_error(llm::OverloadedError, 529, 'x'))).to eq(:overloaded)
+      expect(classify_llm_error(llm_error(llm::RateLimitError, 429, 'x'))).to eq(:rate_limited)
+      expect(classify_llm_error(llm_error(llm::UnauthorizedError, 401, 'x'))).to eq(:authentication)
+      expect(classify_llm_error(llm_error(llm::ForbiddenError, 403, 'x'))).to eq(:authorization)
+      expect(classify_llm_error(llm_error(llm::BadRequestError, 400, 'x'))).to eq(:invalid_request)
+      expect(classify_llm_error(llm_error(llm::ContextLengthExceededError, 400, 'too many tokens')))
+        .to eq(:context_rejected)
+      expect(classify_llm_error(llm::ModelNotFoundError.new('nope'))).to eq(:model_missing)
+    end
+
+    it 'classifies a 5xx model-warmup body (real Faraday::Env) as model_not_ready' do
+      outcome = callable.normalize_dispatch_error(error: ssot_harness.model_not_ready_error)
+      expect(outcome.kind).to eq(:model_not_ready)
+    end
+
     it 'never returns instance_unavailable from the callable for any server error' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
       [500, 502, 503, 504].each do |status|
-        response = { status: status, headers: {}, body: '' }
-        error = Faraday::ServerError.new(status.to_s, response)
+        env = Faraday::Env.new
+        env.status = status
+        env.response_body = '{"error": "server problem"}'
+        error = Faraday::ServerError.new(env)
         outcome = callable.normalize_dispatch_error(error: error)
         expect(outcome.kind).not_to eq(:instance_unavailable),
                                     "status #{status} should not map to instance_unavailable"
@@ -634,7 +657,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # -- No quota domain -------------------------------------------------------
+  # ─── No quota domain ────────────────────────────────────────────────────────
 
   describe 'quota domain safety' do
     it 'does not declare quota_domains on offerings' do
@@ -649,7 +672,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # -- No default model/provider ---------------------------------------------
+  # ─── No default model/provider ──────────────────────────────────────────────
 
   describe 'no default model or provider' do
     it 'rejects instance_id "default" as reserved' do
@@ -679,7 +702,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # -- OllamaCallable contract -----------------------------------------------
+  # ─── OllamaCallable contract ────────────────────────────────────────────────
 
   describe Legion::Extensions::Llm::Ollama::Actor::OllamaCallable do
     let(:callable) do
@@ -689,13 +712,24 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       )
     end
 
-    it 'responds to disconnect' do
+    def wrapped(provider)
+      described_class.new(
+        instance_cfg: ssot_harness.instance_configs[0],
+        logger: Logger.new(File::NULL),
+        provider: provider
+      )
+    end
+
+    it 'responds to disconnect and disconnected?' do
       expect(callable).to respond_to(:disconnect)
       expect(callable).to respond_to(:disconnected?)
     end
 
-    it 'responds to normalize_dispatch_error with kwargs' do
+    it 'responds to the fleet dispatch ops with kwargs' do
       expect(callable).to respond_to(:normalize_dispatch_error)
+      %i[chat stream_chat embed count_tokens].each do |op|
+        expect(callable).to respond_to(op), "production callable must implement the fleet op ##{op}"
+      end
     end
 
     it 'is not disconnected on creation' do
@@ -707,6 +741,85 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       expect(callable.disconnected?).to be(true)
     end
 
+    it 'delegates chat to the per-instance provider with rest passthrough' do
+      provider = RecordingOllamaProvider.new
+      result = wrapped(provider).chat(messages: [{ role: 'user', content: 'hi' }],
+                                      model: 'qwen3:8b', temperature: 0.5)
+
+      expect(result).to include(role: 'assistant')
+      call = provider.calls.first
+      expect(call[:operation]).to eq(:chat)
+      expect(call[:messages]).to eq([{ role: 'user', content: 'hi' }])
+      expect(call[:temperature]).to eq(0.5)
+    end
+
+    # D15 PER-OP: Ollama's render path is string-tolerant
+    # (model.respond_to?(:id) ? model.id : model) for chat and embed, embed
+    # places the model verbatim in the Embedding response object, and
+    # count_tokens ignores it — so the fleet's RAW STRING model must pass
+    # through UNWRAPPED on every op. Wrapping it in Model::Info would
+    # serialize a Data object into the wire payload or the response object.
+    it 'passes the fleet raw-string model through unwrapped on every op (D15 per-op)' do
+      provider = RecordingOllamaProvider.new
+      wrapped(provider).chat(messages: [], model: 'qwen3:8b')
+      wrapped(provider).stream_chat(messages: [], model: 'qwen3:8b')
+      wrapped(provider).embed(text: 'hello', model: 'nomic-embed-text')
+      wrapped(provider).count_tokens(messages: [], model: 'qwen3:8b')
+
+      provider.calls.each do |call|
+        expect(call[:model]).to be_a(String), "op #{call[:operation]} must pass the raw string through"
+      end
+      expect(provider.calls.map { |c| c[:operation] }).to eq(%i[chat stream_chat embed count_tokens])
+      expect(provider.calls[2]).to include(text: 'hello', model: 'nomic-embed-text')
+    end
+
+    it 'passes a Model::Info model through unchanged (D15 pass-through)' do
+      provider = RecordingOllamaProvider.new
+      info = Legion::Extensions::Llm::Model::Info.new(id: 'qwen3:8b', provider: :ollama)
+
+      wrapped(provider).chat(messages: [], model: info)
+
+      expect(provider.calls.first[:model]).to equal(info)
+    end
+
+    # D15 PER-OP against the REAL render path: the production Provider's
+    # render methods must accept the dispatch's raw string model (no
+    # NoMethodError on model.id anywhere in the chat/stream_chat/embed
+    # render paths). Messages are the Message objects the dispatch layer
+    # hands the provider; the model is the raw string under test.
+    it 'drives the real render path with a raw string model (D15 per-op)' do
+      provider = Legion::Extensions::Llm::Ollama::Provider.new(base_url: 'http://127.0.0.1:11437')
+      message = Legion::Extensions::Llm::Message.new(role: :user, content: 'hi')
+      chat_payload = provider.send(
+        :render_payload, [message],
+        tools: [], temperature: nil, model: 'qwen3:8b',
+        stream: false, schema: nil, thinking: nil, tool_prefs: nil
+      )
+      expect(chat_payload[:model]).to eq('qwen3:8b')
+
+      embed_payload = provider.send(:render_embedding_payload, 'hello', model: 'nomic-embed-text', dimensions: nil)
+      expect(embed_payload[:model]).to eq('nomic-embed-text')
+    ensure
+      provider&.disconnect
+    end
+
+    it 'closes the per-instance provider on disconnect' do
+      provider = RecordingOllamaProvider.new
+      wrapped(provider).disconnect
+
+      expect(provider.disconnected).to be(true)
+    end
+
+    it 'lets dispatch errors propagate unrescued (errors escape chat for classification)' do
+      raising = Class.new do
+        def chat(**)
+          raise Faraday::ConnectionFailed, 'connection refused'
+        end
+      end.new
+      expect { wrapped(raising).chat(messages: [], model: 'qwen3:8b') }
+        .to raise_error(Faraday::ConnectionFailed)
+    end
+
     it 'returns a ProviderOutcome from normalize_dispatch_error' do
       outcome = callable.normalize_dispatch_error(error: RuntimeError.new('test'))
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
@@ -715,7 +828,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # -- ReadinessResult contract ----------------------------------------------
+  # ─── ReadinessResult contract ───────────────────────────────────────────────
 
   describe 'ReadinessResult contract' do
     it 'safe_readiness returns a ready ReadinessResult' do
@@ -737,7 +850,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # -- No Legion::LLM reverse dependency ------------------------------------
+  # ─── No Legion::LLM reverse dependency ──────────────────────────────────────
 
   describe 'dependency isolation' do
     it 'does not require Legion::LLM in the discovery actor' do
