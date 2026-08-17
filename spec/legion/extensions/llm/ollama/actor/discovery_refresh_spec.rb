@@ -21,9 +21,9 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
   before { registry.reset! }
   after { settings_tree.clear }
 
-  def key_for(instance_id)
+  def key_for(instance_id, physical_id: nil)
     Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-      provider_family: :ollama, instance_id: instance_id
+      provider_family: :ollama, instance_id: instance_id, physical_id: physical_id
     )
   end
 
@@ -63,6 +63,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
       actor.manual
 
       expect(instance_ids).to be_empty
+      # The derived host:port is the SECONDARY physical id, never the
+      # identity — nothing is published under it.
       expect(registry.snapshot.publication_status(instance_key: key_for('127.0.0.1:11434'))).to be_nil
     end
 
@@ -75,16 +77,17 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
 
       actor.manual
 
-      expect(instance_ids).to eq(['127.0.0.1:11435'])
+      expect(instance_ids).to eq(['alpha'])
     end
 
-    it 'claims instances.default once the operator changes it' do
+    it 'skips an operator-modified instances.default (default is a reserved identity)' do
       configure_instances(default: synthetic_default.merge(base_url: 'http://127.0.0.1:11500'))
       stub_boundaries(readiness_result: healthy)
 
       actor.manual
 
-      expect(instance_ids).to eq(['127.0.0.1:11500'])
+      expect(instance_ids).to be_empty
+      expect(registry.snapshot.publication_status(instance_key: key_for('127.0.0.1:11500'))).to be_nil
     end
 
     it 'skips disabled and endpoint-less instances' do
@@ -104,8 +107,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
         alpha: { base_url: 'http://127.0.0.1:11435', tier: :local },
         beta: { base_url: 'http://127.0.0.1:11436', tier: :local }
       )
-      up = key_for('127.0.0.1:11435')
-      down = key_for('127.0.0.1:11436')
+      up = key_for('alpha', physical_id: '127.0.0.1:11435')
+      down = key_for('beta', physical_id: '127.0.0.1:11436')
       allow(actor).to receive(:check_readiness) do |instance_cfg:|
         instance_cfg[:base_url].end_with?('11435') ? healthy : unhealthy
       end
@@ -117,6 +120,35 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
       expect(registry.snapshot.instance(instance_key: up).availability.state).to eq(:available)
       expect(registry.snapshot.publication_status(instance_key: down).state).to eq(:initializing)
       expect(registry.snapshot.instance(instance_key: down)).to be_nil
+    end
+  end
+
+  # ── Identity = config name (derived host:port is the secondary physical id) ─
+
+  describe 'config-name identity' do
+    before do
+      stub_boundaries(readiness_result: healthy)
+    end
+
+    it 'publishes the config name as instance_id and the derived host:port as physical_id' do
+      configure_instances(apollo: { base_url: 'http://127.0.0.1:11435', tier: :local })
+
+      actor.manual
+
+      record = registry.snapshot.instance(instance_key: key_for('apollo', physical_id: '127.0.0.1:11435'))
+      expect(record.instance_key.instance_id).to eq('apollo')
+      expect(record.instance_key.physical_id).to eq('127.0.0.1:11435')
+    end
+
+    it 'registers two config names pointing at the same endpoint as distinct instances' do
+      configure_instances(
+        apollo: { base_url: 'http://127.0.0.1:11435', tier: :local },
+        apollo_embed: { base_url: 'http://127.0.0.1:11435', tier: :local }
+      )
+
+      actor.manual
+
+      expect(instance_ids.sort).to eq(%w[apollo apollo_embed])
     end
   end
 
@@ -134,7 +166,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
 
       actor.manual # initial discovery: claim + readiness FAILED
 
-      key = key_for('127.0.0.1:11435')
+      key = key_for('alpha', physical_id: '127.0.0.1:11435')
       expect(registry.snapshot.instance(instance_key: key)).to be_nil
       expect(registry.snapshot.publication_status(instance_key: key).state).to eq(:initializing)
 
@@ -151,7 +183,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
       actor.manual
       actor.manual
 
-      key = key_for('127.0.0.1:11435')
+      key = key_for('alpha', physical_id: '127.0.0.1:11435')
       expect(registry.snapshot.instance(instance_key: key)).to be_nil
       expect(registry.snapshot.publication_status(instance_key: key).state).to eq(:initializing)
     end
@@ -165,12 +197,12 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
 
       configure_instances(alpha: { base_url: 'http://127.0.0.1:11435', tier: :local })
       actor.manual
-      expect(instance_ids).to eq(['127.0.0.1:11435'])
+      expect(instance_ids).to eq(['alpha'])
 
       configure_instances(beta: { base_url: 'http://127.0.0.1:11436', tier: :local })
       actor.manual
       # Late instance claimed, removed instance retired.
-      expect(instance_ids).to eq(['127.0.0.1:11436'])
+      expect(instance_ids).to eq(['beta'])
     end
   end
 
@@ -190,7 +222,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
       actor.manual # tick 1
       actor.manual # tick 2
 
-      key = key_for('127.0.0.1:11435')
+      key = key_for('alpha', physical_id: '127.0.0.1:11435')
       # Unchanged offerings must not bump the publication sequence.
       expect(registry.snapshot.publication_status(instance_key: key).published_sequence).to eq(0)
     end
@@ -204,7 +236,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
       actor.manual # initial activate with one model
       actor.manual # tick: second model appears → replace
 
-      key = key_for('127.0.0.1:11435')
+      key = key_for('alpha', physical_id: '127.0.0.1:11435')
       expect(registry.snapshot.publication_status(instance_key: key).published_sequence).to eq(1)
       expect(registry.snapshot.offerings_for(instance_key: key).size).to eq(2)
     end
@@ -281,7 +313,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
       actor.shutdown
       expect(settings_tree.dig(:instances, :alpha, :health)).to be_nil
       expect(settings_tree.dig(:instances, :alpha, :capabilities)).to be_nil
-      expect(registry.snapshot.instance(instance_key: key_for('127.0.0.1:11435'))).to be_nil
+      expect(registry.snapshot.instance(instance_key: key_for('alpha', physical_id: '127.0.0.1:11435'))).to be_nil
     end
   end
 
@@ -310,7 +342,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
   describe 'offering discovery error handling (D16)' do
     # Plain methods (not lets) to stay under RSpec/MultipleMemoizedHelpers.
     def d16_instance_cfg = { base_url: 'http://127.0.0.1:11435', tier: :local }
-    def d16_instance_key = key_for('127.0.0.1:11435')
+    def d16_instance_key = key_for('alpha', physical_id: '127.0.0.1:11435')
 
     it 'propagates programming errors instead of publishing an empty offering set' do
       allow(actor).to receive(:fetch_models).and_return([{ name: 'qwen3:8b' }])

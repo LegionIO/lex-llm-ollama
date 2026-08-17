@@ -84,6 +84,16 @@ module Legion
             return nil
           end
 
+          # InstanceKey (lex-llm foundation) reserves 'default' as an
+          # instance identity, so a modified instances.default can never be
+          # registered under its name. Skip it HERE — not at claim time — so
+          # the discovery actor and the fleet responder agree on the
+          # claimable set (D3).
+          if name.to_s == 'default'
+            log.warn('[ollama][discovery] action=skip_instance instance=default reason=reserved_identity')
+            return nil
+          end
+
           unless normalized[:base_url].is_a?(String) && !normalized[:base_url].strip.empty?
             log.warn("[ollama][discovery] action=skip_instance instance=#{name} reason=missing_endpoint")
             return nil

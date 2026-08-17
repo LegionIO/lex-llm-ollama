@@ -36,13 +36,19 @@ module Legion
           module EvidenceBuilder
             private
 
+            # Authoritative operation evidence (matches how bedrock excludes
+            # embedding models): an EMBEDDING model publishes chat and
+            # stream_chat as :unsupported so a plain chat request cannot
+            # misroute to an embedding instance, and a chat model publishes
+            # embed as :unsupported.
             def build_operation_evidence(embed_supported:)
               now = Time.now.freeze
+              chat_status = embed_supported ? :unsupported : :supported
               embed_status = embed_supported ? :supported : :unsupported
 
               {
-                chat: op_evidence(operation: :chat, status: :supported, observed_at: now),
-                stream_chat: op_evidence(operation: :stream_chat, status: :supported, observed_at: now),
+                chat: op_evidence(operation: :chat, status: chat_status, observed_at: now),
+                stream_chat: op_evidence(operation: :stream_chat, status: chat_status, observed_at: now),
                 embed: op_evidence(operation: :embed, status: embed_status, observed_at: now),
                 image: op_evidence(operation: :image, status: :unsupported, observed_at: now),
                 transcribe: op_evidence(operation: :transcribe, status: :unsupported, observed_at: now),
@@ -336,7 +342,13 @@ module Legion
               end
             end
 
-            def derive_instance_id(instance_cfg:)
+            # Secondary PHYSICAL id (dedup/diagnostics), not identity: the
+            # exact host:port the operator configured — the thing that can
+            # independently become unavailable. Identity is the config NAME
+            # (InstanceKey.instance_id), so two config names pointing at the
+            # same endpoint stay distinct instances. No host or port
+            # fallback (a fallback physical id would mask a missing endpoint).
+            def derive_physical_id(instance_cfg:)
               base_url = instance_cfg[:base_url] || instance_cfg[:endpoint]
               unless base_url.is_a?(String) && !base_url.strip.empty?
                 raise ArgumentError, "ollama instance has no endpoint: #{base_url.inspect}"
@@ -345,9 +357,6 @@ module Legion
               extract_host_port(url: base_url)
             end
 
-            # Identity is the exact host:port the operator configured — the
-            # thing that can independently become unavailable. No host or
-            # port fallback (a fallback identity would collide instances).
             def extract_host_port(url:)
               uri = URI.parse(url.to_s)
               host = uri.host
@@ -364,68 +373,80 @@ module Legion
           module ProbeRunner
             private
 
-            def run_cadence_probe(instance_id:, state:)
+            def run_cadence_probe(state:)
+              instance_id = state[:instance_id]
               coordinator = state[:probe_coordinator]
               return unless coordinator.begin_probe
 
               probe_token = publisher.readiness_probe_started(
-                instance_id: instance_id, publisher_token: state[:publisher_token]
+                instance_id: instance_id, physical_id: state[:physical_id],
+                publisher_token: state[:publisher_token]
               )
               readiness = check_readiness(instance_cfg: state[:instance_cfg])
               coordinator.finish_probe
-              report_probe_result(instance_id: instance_id, probe_token: probe_token, readiness: readiness)
+              report_probe_result(instance_id: instance_id, physical_id: state[:physical_id],
+                                  probe_token: probe_token, readiness: readiness)
               sync_display_health(state: state)
             rescue StandardError => e
               begin
                 coordinator&.finish_probe
               rescue StandardError => finish_err
                 handle_exception(finish_err, level: :warn, operation: 'ollama.actor.cadence_probe.finish_probe',
-                                             instance_id: instance_id)
+                                             instance_id: state[:instance_id])
               end
-              handle_exception(e, level: :warn, operation: 'ollama.actor.cadence_probe', instance_id: instance_id)
+              handle_exception(e, level: :warn, operation: 'ollama.actor.cadence_probe',
+                                  instance_id: state[:instance_id])
             end
 
-            def handle_reactive_probe(instance_id:, request:)
-              state = @instance_states[instance_id]
+            # name is the CONFIG NAME — the @instance_states key. The
+            # publisher calls use the state's instance_id + physical_id pair.
+            def handle_reactive_probe(name:, request:)
+              state = @instance_states[name]
               return unless state
 
               coordinator = state[:probe_coordinator]
               return unless coordinator.begin_probe(request: request)
 
               probe_token = publisher.readiness_probe_started(
-                instance_id: instance_id, publisher_token: state[:publisher_token]
+                instance_id: state[:instance_id], physical_id: state[:physical_id],
+                publisher_token: state[:publisher_token]
               )
               readiness = check_readiness(instance_cfg: state[:instance_cfg])
               coordinator.finish_probe(request: request)
-              report_probe_result(instance_id: instance_id, probe_token: probe_token, readiness: readiness)
+              report_probe_result(instance_id: state[:instance_id], physical_id: state[:physical_id],
+                                  probe_token: probe_token, readiness: readiness)
               sync_display_health(state: state)
             rescue StandardError => e
               begin
                 coordinator&.finish_probe(request: request)
               rescue StandardError => finish_err
                 handle_exception(finish_err, level: :warn, operation: 'ollama.actor.reactive_probe.finish_probe',
-                                             instance_id: instance_id)
+                                             instance_id: state[:instance_id])
               end
-              handle_exception(e, level: :warn, operation: 'ollama.actor.reactive_probe', instance_id: instance_id)
+              handle_exception(e, level: :warn, operation: 'ollama.actor.reactive_probe',
+                                  instance_id: state[:instance_id])
             end
 
-            def report_probe_result(instance_id:, probe_token:, readiness:)
+            def report_probe_result(instance_id:, physical_id:, probe_token:, readiness:)
               if readiness.ready?
-                publisher.readiness_succeeded(instance_id: instance_id, probe_token: probe_token)
+                publisher.readiness_succeeded(
+                  instance_id: instance_id, physical_id: physical_id, probe_token: probe_token
+                )
               else
                 publisher.readiness_failed(
-                  instance_id: instance_id, probe_token: probe_token, reason: readiness.reason
+                  instance_id: instance_id, physical_id: physical_id, probe_token: probe_token,
+                  reason: readiness.reason
                 )
               end
             end
 
-            def build_probe_enqueue(instance_id:)
+            def build_probe_enqueue(name:)
               proc do |request:|
-                handle_reactive_probe(instance_id: instance_id, request: request)
+                handle_reactive_probe(name: name, request: request)
                 true
               rescue StandardError => e
                 handle_exception(e, level: :warn, operation: 'ollama.actor.probe_enqueue',
-                                    instance_id: instance_id)
+                                    instance_name: name.to_s)
                 false
               end
             end
@@ -619,32 +640,43 @@ module Legion
           module InstanceComponents
             private
 
-            def build_instance_key(instance_id:)
+            def build_instance_key(instance_id:, physical_id:)
               Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-                provider_family: :ollama, instance_id: instance_id
+                provider_family: :ollama, instance_id: instance_id, physical_id: physical_id
               )
             end
 
-            def build_instance_components(instance_id:, instance_cfg:, instance_key:)
+            def build_instance_components(name:, instance_id:, physical_id:, instance_cfg:, instance_key:)
               callable = OllamaCallable.new(instance_cfg: instance_cfg, logger: log)
               probe_coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-                instance_key: instance_key, enqueue: build_probe_enqueue(instance_id: instance_id)
+                instance_key: instance_key, enqueue: build_probe_enqueue(name: name)
               )
               publisher_token = publisher.claim_instance(
-                instance_id: instance_id, callable: callable, probe_request_handle: probe_coordinator
+                instance_id: instance_id, physical_id: physical_id, callable: callable,
+                probe_request_handle: probe_coordinator
               )
               { callable: callable, probe_coordinator: probe_coordinator, publisher_token: publisher_token }
             end
 
+            # Identity is the operator's CONFIG NAME (InstanceKey.instance_id)
+            # — the key the router uses for instances.<name> settings lookups.
+            # The derived host:port rides along as the SECONDARY physical_id
+            # (dedup/diagnostics only), so two config names pointing at the
+            # same endpoint stay distinct instances and name-keyed tuning and
+            # enable_* overrides stay effective.
             def claim_and_activate_instance(name:, instance_cfg:)
-              instance_id = derive_instance_id(instance_cfg: instance_cfg)
-              instance_key = build_instance_key(instance_id: instance_id)
-              components = build_instance_components(instance_id: instance_id, instance_cfg: instance_cfg,
-                                                     instance_key: instance_key)
+              instance_id = name.to_s
+              physical_id = derive_physical_id(instance_cfg: instance_cfg)
+              instance_key = build_instance_key(instance_id: instance_id, physical_id: physical_id)
+              components = build_instance_components(
+                name: name.to_sym, instance_id: instance_id, physical_id: physical_id,
+                instance_cfg: instance_cfg, instance_key: instance_key
+              )
               offerings = discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
               state = {
                 name: name.to_sym,
                 instance_id: instance_id,
+                physical_id: physical_id,
                 instance_key: instance_key,
                 instance_cfg: instance_cfg,
                 callable: components[:callable],
@@ -653,19 +685,22 @@ module Legion
                 sequence: 0,
                 offerings: offerings
               }
-              settle_initial_readiness(instance_id: instance_id, state: state)
-              @instance_states[instance_id] = state
+              settle_initial_readiness(state: state)
+              @instance_states[name.to_sym] = state
               sync_display_health(state: state)
             end
 
-            def drop_instance(instance_id:, state:)
-              publisher.remove_instance(instance_id: instance_id, publisher_token: state[:publisher_token])
+            def drop_instance(name:, state:)
+              publisher.remove_instance(
+                instance_id: state[:instance_id], physical_id: state[:physical_id],
+                publisher_token: state[:publisher_token]
+              )
               state[:callable]&.disconnect
               clear_display_health(name: state[:name])
-              @instance_states.delete(instance_id)
+              @instance_states.delete(name)
             rescue StandardError => e
               handle_exception(e, level: :warn, operation: 'ollama.actor.remove_instance',
-                                  instance_id: instance_id)
+                                  instance_id: state[:instance_id])
             end
           end
 
@@ -688,25 +723,27 @@ module Legion
             # settings are retired from the registry. Instances claimed THIS
             # tick are not refreshed again in the same pass — their initial
             # probe just ran; refresh and cadence probes start next tick.
+            # @instance_states is keyed by the CONFIG NAME (Symbol): identity
+            # is the name, so two names pointing at the same endpoint are
+            # distinct, independently-managed instances.
             def reconcile_and_refresh
               configured = configured_instances
               existing = @instance_states.keys
               add_newly_configured_instances(configured: configured)
               remove_unconfigured_instances(configured: configured)
-              @instance_states.each do |instance_id, state|
-                next unless existing.include?(instance_id)
+              @instance_states.each do |name, state|
+                next unless existing.include?(name)
 
-                refresh_instance(instance_id: instance_id, state: state)
+                refresh_instance(state: state)
               rescue StandardError => e
                 handle_exception(e, level: :warn, operation: 'ollama.actor.refresh_instance',
-                                    instance_id: instance_id)
+                                    instance_id: state[:instance_id])
               end
             end
 
             def add_newly_configured_instances(configured:)
               configured.each do |name, instance_cfg|
-                instance_id = derive_instance_id(instance_cfg: instance_cfg)
-                next if @instance_states.key?(instance_id)
+                next if @instance_states.key?(name.to_sym)
 
                 claim_and_activate_instance(name: name, instance_cfg: instance_cfg)
               rescue StandardError => e
@@ -715,10 +752,10 @@ module Legion
             end
 
             def remove_unconfigured_instances(configured:)
-              @instance_states.each_value do |state|
-                next if configured.key?(state[:name])
+              @instance_states.each do |name, state|
+                next if configured.key?(name)
 
-                drop_instance(instance_id: state[:instance_id], state: state)
+                drop_instance(name: name, state: state)
               end
             end
 
@@ -726,29 +763,34 @@ module Legion
             # the current offerings (sequence 0 — valid only while the scope
             # is still :initializing), on failure records it and the instance
             # stays :initializing for the next tick's retry.
-            def settle_initial_readiness(instance_id:, state:)
+            def settle_initial_readiness(state:)
+              instance_id = state[:instance_id]
+              physical_id = state[:physical_id]
               probe_token = publisher.readiness_probe_started(
-                instance_id: instance_id, publisher_token: state[:publisher_token]
+                instance_id: instance_id, physical_id: physical_id,
+                publisher_token: state[:publisher_token]
               )
               readiness = check_readiness(instance_cfg: state[:instance_cfg])
               if readiness.ready?
                 publisher.activate_instance_snapshot(
-                  instance_id: instance_id, publisher_token: state[:publisher_token],
+                  instance_id: instance_id, physical_id: physical_id,
+                  publisher_token: state[:publisher_token],
                   offerings: state[:offerings], sequence: 0, probe_token: probe_token
                 )
               else
                 publisher.readiness_failed(
-                  instance_id: instance_id, probe_token: probe_token, reason: readiness.reason
+                  instance_id: instance_id, physical_id: physical_id,
+                  probe_token: probe_token, reason: readiness.reason
                 )
               end
             end
 
-            def refresh_instance(instance_id:, state:)
+            def refresh_instance(state:)
               if publication_state(instance_key: state[:instance_key]) == :initializing
-                retry_initial_activation(instance_id: instance_id, state: state)
+                retry_initial_activation(state: state)
               else
-                replace_offerings_if_changed(instance_id: instance_id, state: state)
-                run_cadence_probe(instance_id: instance_id, state: state)
+                replace_offerings_if_changed(state: state)
+                run_cadence_probe(state: state)
               end
             end
 
@@ -761,15 +803,15 @@ module Legion
             # operate on an :initializing scope, so without this re-activation
             # path a transient outage at boot pins the instance for the process
             # lifetime. Re-probe each tick and activate once readiness passes.
-            def retry_initial_activation(instance_id:, state:)
+            def retry_initial_activation(state:)
               state[:offerings] = discover_offerings_for_instance(
                 instance_cfg: state[:instance_cfg], instance_key: state[:instance_key]
               )
-              settle_initial_readiness(instance_id: instance_id, state: state)
+              settle_initial_readiness(state: state)
               sync_display_health(state: state)
             end
 
-            def replace_offerings_if_changed(instance_id:, state:)
+            def replace_offerings_if_changed(state:)
               new_offerings = discover_offerings_for_instance(
                 instance_cfg: state[:instance_cfg], instance_key: state[:instance_key]
               )
@@ -777,7 +819,8 @@ module Legion
 
               state[:sequence] += 1
               publisher.replace_instance_snapshot(
-                instance_id: instance_id, publisher_token: state[:publisher_token],
+                instance_id: state[:instance_id], physical_id: state[:physical_id],
+                publisher_token: state[:publisher_token],
                 offerings: new_offerings, sequence: state[:sequence]
               )
               state[:offerings] = new_offerings
@@ -787,8 +830,8 @@ module Legion
             def remove_all_instances
               return unless @instance_states
 
-              @instance_states.each_value do |state|
-                drop_instance(instance_id: state[:instance_id], state: state)
+              @instance_states.each do |name, state|
+                drop_instance(name: name, state: state)
               end
               @instance_states.clear
             end

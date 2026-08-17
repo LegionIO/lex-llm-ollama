@@ -83,16 +83,20 @@ class OllamaExplicitServiceGoneSignal < StandardError; end
 # delegate to the PRODUCTION methods — the harness duplicates no builder
 # logic (drift would mask production bugs).
 class OllamaSsotHarness
-  # 127.0.0.1 ports with nothing listening: the draft builder's per-model
-  # /api/show fetch fails fast (connection refused, no DNS) and degrades to
-  # absent detail evidence, so drafts are built by the production builder
-  # without external network dependencies.
+  # The config NAME is the operator's identity (InstanceKey.instance_id);
+  # the endpoint is the secondary physical id. 127.0.0.1 ports with nothing
+  # listening: the draft builder's per-model /api/show fetch fails fast
+  # (connection refused, no DNS) and degrades to absent detail evidence, so
+  # drafts are built by the production builder without external network
+  # dependencies.
   INSTANCE_CONFIGS = [
     {
+      name: 'alpha',
       base_url: 'http://127.0.0.1:11435',
       tier: :local
     }.freeze,
     {
+      name: 'beta',
       base_url: 'http://127.0.0.1:11436',
       tier: :local
     }.freeze
@@ -106,10 +110,19 @@ class OllamaSsotHarness
   def provider_family = :ollama
   def instance_configs = INSTANCE_CONFIGS
 
-  # Delegates to the actor's PRODUCTION identity derivation.
+  # Identity is the operator's CONFIG NAME — the production claim path
+  # (DiscoveryRefresh#claim_and_activate_instance) uses name.to_s as
+  # InstanceKey.instance_id, the key the router uses for instances.<name>
+  # settings lookups.
   def instance_id(instance_config:)
+    instance_config.fetch(:name).to_s
+  end
+
+  # Delegates to the actor's PRODUCTION physical-id derivation — the
+  # secondary dedup/diagnostics field, not identity.
+  def physical_id(instance_config:)
     Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh
-      .allocate.send(:derive_instance_id, instance_cfg: instance_config)
+      .allocate.send(:derive_physical_id, instance_cfg: instance_config)
   end
 
   def build_callable(instance_config:)
@@ -123,21 +136,23 @@ class OllamaSsotHarness
 
   # Delegates to the actor's PRODUCTION draft builder (ModelDiscovery),
   # not a spec-local duplicate of the evidence construction.
-  def build_offering_drafts(instance_config:, tier: :local, **)
+  def build_offering_drafts(instance_config:, tier: :local, model_name: 'qwen3:8b', model_data: nil, **)
     actor = Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh.allocate
     cfg = instance_config.merge(tier: tier)
-    instance_id = actor.send(:derive_instance_id, instance_cfg: cfg)
-    instance_key = actor.send(:build_instance_key, instance_id: instance_id)
+    instance_id = cfg.fetch(:name).to_s
+    physical_id = actor.send(:derive_physical_id, instance_cfg: cfg)
+    instance_key = actor.send(:build_instance_key, instance_id: instance_id, physical_id: physical_id)
+    data = model_data || {
+      name: model_name,
+      digest: 'sha256:specdigest',
+      details: { family: 'qwen3' },
+      size: 4_700_000_000
+    }
     [
       actor.send(
         :build_offering_draft,
-        model_name: 'qwen3:8b',
-        model_data: {
-          name: 'qwen3:8b',
-          digest: 'sha256:specdigest',
-          details: { family: 'qwen3' },
-          size: 4_700_000_000
-        },
+        model_name: model_name,
+        model_data: data,
         instance_cfg: cfg,
         instance_key: instance_key
       )
@@ -218,33 +233,58 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
   it_behaves_like 'an SSOT v3 provider adapter'
 
-  # ─── Ollama-specific identity derivation ────────────────────────────────────
+  # ─── Ollama-specific identity (config name + secondary physical id) ─────────
 
   describe 'instance identity derivation' do
-    it 'derives instance_id as host:port from endpoint URL' do
-      config = { base_url: 'http://ollama-server-1.internal:11434' }
-      expect(ssot_harness.instance_id(instance_config: config)).to eq('ollama-server-1.internal:11434')
+    it 'uses the operator config name as the instance identity' do
+      config = { name: 'server1', base_url: 'http://ollama-server-1.internal:11434' }
+      expect(ssot_harness.instance_id(instance_config: config)).to eq('server1')
     end
 
-    it 'derives instance_id with non-standard port' do
-      config = { base_url: 'http://ollama-server-2.internal:11435' }
-      expect(ssot_harness.instance_id(instance_config: config)).to eq('ollama-server-2.internal:11435')
+    it 'derives the secondary physical_id as host:port from the endpoint URL' do
+      config = { name: 'server1', base_url: 'http://ollama-server-1.internal:11434' }
+      expect(ssot_harness.physical_id(instance_config: config)).to eq('ollama-server-1.internal:11434')
     end
 
-    it 'produces distinct instance IDs for two different endpoints' do
+    it 'derives the physical_id with a non-standard port' do
+      config = { name: 'server2', base_url: 'http://ollama-server-2.internal:11435' }
+      expect(ssot_harness.physical_id(instance_config: config)).to eq('ollama-server-2.internal:11435')
+    end
+
+    it 'produces distinct identities for two different config names' do
       ids = ssot_harness.instance_configs.map { |cfg| ssot_harness.instance_id(instance_config: cfg) }
       expect(ids.uniq.size).to eq(2)
     end
 
-    it 'reproduces the same instance_id across multiple calls (stable identity)' do
+    it 'keeps two config names distinct even when they point at the same endpoint' do
+      a = { name: 'apollo', base_url: 'http://127.0.0.1:11435' }
+      b = { name: 'apollo-embed', base_url: 'http://127.0.0.1:11435' }
+      expect(ssot_harness.instance_id(instance_config: a)).not_to eq(ssot_harness.instance_id(instance_config: b))
+    end
+
+    it 'excludes the physical_id from key equality and hashing' do
+      bare = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+        provider_family: :ollama, instance_id: 'apollo'
+      )
+      with_physical = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+        provider_family: :ollama, instance_id: 'apollo', physical_id: '127.0.0.1:11435'
+      )
+      expect(bare).to eq(with_physical)
+      expect(bare.hash).to eq(with_physical.hash)
+    end
+
+    it 'reproduces the same identity and physical id across multiple calls (stable)' do
       config = ssot_harness.instance_configs.first
       id_a = ssot_harness.instance_id(instance_config: config)
       id_b = ssot_harness.instance_id(instance_config: config)
       expect(id_a).to eq(id_b)
+      phys_a = ssot_harness.physical_id(instance_config: config)
+      phys_b = ssot_harness.physical_id(instance_config: config)
+      expect(phys_a).to eq(phys_b)
     end
 
-    it 'raises on a config with no endpoint (no fallback identity)' do
-      expect { ssot_harness.instance_id(instance_config: {}) }
+    it 'raises on a config with no endpoint (no fallback physical id)' do
+      expect { ssot_harness.physical_id(instance_config: { name: 'noendpoint' }) }
         .to raise_error(ArgumentError, /no endpoint/)
     end
   end
@@ -255,20 +295,22 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     def bring_up_instance(config, tier: :local)
       publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama)
       instance_id = ssot_harness.instance_id(instance_config: config)
+      physical_id = ssot_harness.physical_id(instance_config: config)
       key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :ollama, instance_id: instance_id
+        provider_family: :ollama, instance_id: instance_id, physical_id: physical_id
       )
       callable = ssot_harness.build_callable(instance_config: config)
       coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
         instance_key: key, enqueue: ->(**) { true }
       )
 
-      token = publisher.claim_instance(instance_id: instance_id, callable: callable,
+      token = publisher.claim_instance(instance_id: instance_id, physical_id: physical_id, callable: callable,
                                        probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
+      probe = publisher.readiness_probe_started(instance_id: instance_id, physical_id: physical_id,
+                                                publisher_token: token)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: tier)
       publisher.activate_instance_snapshot(
-        instance_id: instance_id, publisher_token: token, offerings: drafts,
+        instance_id: instance_id, physical_id: physical_id, publisher_token: token, offerings: drafts,
         sequence: 0, probe_token: probe
       )
 
@@ -314,20 +356,22 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     def bring_up_with_tier(config, tier:)
       publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama)
       instance_id = ssot_harness.instance_id(instance_config: config)
+      physical_id = ssot_harness.physical_id(instance_config: config)
       key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :ollama, instance_id: instance_id
+        provider_family: :ollama, instance_id: instance_id, physical_id: physical_id
       )
       callable = ssot_harness.build_callable(instance_config: config)
       coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
         instance_key: key, enqueue: ->(**) { true }
       )
 
-      token = publisher.claim_instance(instance_id: instance_id, callable: callable,
+      token = publisher.claim_instance(instance_id: instance_id, physical_id: physical_id, callable: callable,
                                        probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
+      probe = publisher.readiness_probe_started(instance_id: instance_id, physical_id: physical_id,
+                                                publisher_token: token)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: tier)
       publisher.activate_instance_snapshot(
-        instance_id: instance_id, publisher_token: token, offerings: drafts,
+        instance_id: instance_id, physical_id: physical_id, publisher_token: token, offerings: drafts,
         sequence: 0, probe_token: probe
       )
 
@@ -346,7 +390,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
         instance_config: config, callable: context[:callable], tier: :frontier
       )
       context[:publisher].replace_instance_snapshot(
-        instance_id: ssot_harness.instance_id(instance_config: config),
+        instance_id: context[:key].instance_id,
+        physical_id: context[:key].physical_id,
         publisher_token: context[:token],
         offerings: frontier_drafts,
         sequence: 1
@@ -405,6 +450,36 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
+  # ─── Authoritative operation evidence for embedding models ──────────────────
+
+  describe 'operation evidence for an embedding model' do
+    let(:config) { ssot_harness.instance_configs[0] }
+    let(:offering) do
+      ssot_harness.build_offering_drafts(
+        instance_config: config,
+        model_name: 'nomic-embed-text',
+        model_data: { name: 'nomic-embed-text', digest: 'sha256:embeddigest', size: 100_000_000 }
+      ).first
+    end
+
+    it 'publishes chat as unsupported so a plain chat request cannot misroute' do
+      expect(offering.operation_evidence[:chat].status).to eq(:unsupported)
+      expect(offering.operation_evidence[:chat].source).to eq(:provider_implementation)
+    end
+
+    it 'publishes stream_chat as unsupported' do
+      expect(offering.operation_evidence[:stream_chat].status).to eq(:unsupported)
+    end
+
+    it 'publishes embed as supported' do
+      expect(offering.operation_evidence[:embed].status).to eq(:supported)
+    end
+
+    it 'publishes the embedding capability as supported' do
+      expect(offering.capability_evidence[:embedding].status).to eq(:supported)
+    end
+  end
+
   # ─── Startup gating ─────────────────────────────────────────────────────────
 
   describe 'startup gating' do
@@ -412,7 +487,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     let(:key) do
       Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
         provider_family: :ollama,
-        instance_id: ssot_harness.instance_id(instance_config: config)
+        instance_id: ssot_harness.instance_id(instance_config: config),
+        physical_id: ssot_harness.physical_id(instance_config: config)
       )
     end
     let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama) }
@@ -427,7 +503,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
 
     it 'remains initializing until readiness probe succeeds' do
-      publisher.claim_instance(instance_id: key.instance_id, callable: callable,
+      publisher.claim_instance(instance_id: key.instance_id, physical_id: key.physical_id, callable: callable,
                                probe_request_handle: build_coordinator)
 
       snapshot = Legion::Extensions::Llm::Inventory::Registry.snapshot
@@ -436,10 +512,11 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
 
     it 'stays initializing after an initial readiness failure' do
-      token = publisher.claim_instance(instance_id: key.instance_id, callable: callable,
+      token = publisher.claim_instance(instance_id: key.instance_id, physical_id: key.physical_id, callable: callable,
                                        probe_request_handle: build_coordinator)
-      probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
-      publisher.readiness_failed(instance_id: key.instance_id, probe_token: probe,
+      probe = publisher.readiness_probe_started(instance_id: key.instance_id, physical_id: key.physical_id,
+                                                publisher_token: token)
+      publisher.readiness_failed(instance_id: key.instance_id, physical_id: key.physical_id, probe_token: probe,
                                  reason: 'Ollama /api/tags connection failed')
 
       snapshot = Legion::Extensions::Llm::Inventory::Registry.snapshot
@@ -448,12 +525,14 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
 
     it 'transitions to available after readiness success' do
-      token = publisher.claim_instance(instance_id: key.instance_id, callable: callable,
+      token = publisher.claim_instance(instance_id: key.instance_id, physical_id: key.physical_id, callable: callable,
                                        probe_request_handle: build_coordinator)
-      probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
+      probe = publisher.readiness_probe_started(instance_id: key.instance_id, physical_id: key.physical_id,
+                                                publisher_token: token)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :local)
       publisher.activate_instance_snapshot(
-        instance_id: key.instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
+        instance_id: key.instance_id, physical_id: key.physical_id, publisher_token: token,
+        offerings: drafts, sequence: 0, probe_token: probe
       )
 
       snapshot = Legion::Extensions::Llm::Inventory::Registry.snapshot
@@ -469,7 +548,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     let(:key) do
       Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
         provider_family: :ollama,
-        instance_id: ssot_harness.instance_id(instance_config: config)
+        instance_id: ssot_harness.instance_id(instance_config: config),
+        physical_id: ssot_harness.physical_id(instance_config: config)
       )
     end
     let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama) }
@@ -484,12 +564,14 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
 
     def activate_instance
-      token = publisher.claim_instance(instance_id: key.instance_id, callable: callable,
+      token = publisher.claim_instance(instance_id: key.instance_id, physical_id: key.physical_id, callable: callable,
                                        probe_request_handle: build_coordinator)
-      probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
+      probe = publisher.readiness_probe_started(instance_id: key.instance_id, physical_id: key.physical_id,
+                                                publisher_token: token)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :local)
       publisher.activate_instance_snapshot(
-        instance_id: key.instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
+        instance_id: key.instance_id, physical_id: key.physical_id, publisher_token: token,
+        offerings: drafts, sequence: 0, probe_token: probe
       )
       token
     end
@@ -497,12 +579,16 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     it 'rejects a stale probe started before a newer failure' do
       token = activate_instance
 
-      stale_probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
-      fresh_probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
+      stale_probe = publisher.readiness_probe_started(instance_id: key.instance_id, physical_id: key.physical_id,
+                                                      publisher_token: token)
+      fresh_probe = publisher.readiness_probe_started(instance_id: key.instance_id, physical_id: key.physical_id,
+                                                      publisher_token: token)
 
-      publisher.readiness_failed(instance_id: key.instance_id, probe_token: fresh_probe, reason: 'server down')
+      publisher.readiness_failed(instance_id: key.instance_id, physical_id: key.physical_id, probe_token: fresh_probe,
+                                 reason: 'server down')
 
-      result = publisher.readiness_succeeded(instance_id: key.instance_id, probe_token: stale_probe)
+      result = publisher.readiness_succeeded(instance_id: key.instance_id, physical_id: key.physical_id,
+                                             probe_token: stale_probe)
       expect(result.applied).to be(false)
       expect(result.reason).to eq(:stale_probe)
     end
@@ -516,8 +602,10 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       )
       expect(reg.snapshot.instance(instance_key: key).availability.state).to eq(:unavailable)
 
-      new_probe = publisher.readiness_probe_started(instance_id: key.instance_id, publisher_token: token)
-      publisher.readiness_succeeded(instance_id: key.instance_id, probe_token: new_probe)
+      new_probe = publisher.readiness_probe_started(instance_id: key.instance_id, physical_id: key.physical_id,
+                                                    publisher_token: token)
+      publisher.readiness_succeeded(instance_id: key.instance_id, physical_id: key.physical_id,
+                                    probe_token: new_probe)
       expect(reg.snapshot.instance(instance_key: key).availability.state).to eq(:available)
     end
   end
@@ -528,20 +616,22 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     def bring_up(config)
       publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama)
       instance_id = ssot_harness.instance_id(instance_config: config)
+      physical_id = ssot_harness.physical_id(instance_config: config)
       key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :ollama, instance_id: instance_id
+        provider_family: :ollama, instance_id: instance_id, physical_id: physical_id
       )
       callable = ssot_harness.build_callable(instance_config: config)
       coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
         instance_key: key, enqueue: ->(**) { true }
       )
 
-      token = publisher.claim_instance(instance_id: instance_id, callable: callable,
+      token = publisher.claim_instance(instance_id: instance_id, physical_id: physical_id, callable: callable,
                                        probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
+      probe = publisher.readiness_probe_started(instance_id: instance_id, physical_id: physical_id,
+                                                publisher_token: token)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :local)
       publisher.activate_instance_snapshot(
-        instance_id: instance_id, publisher_token: token, offerings: drafts,
+        instance_id: instance_id, physical_id: physical_id, publisher_token: token, offerings: drafts,
         sequence: 0, probe_token: probe
       )
 

@@ -46,10 +46,14 @@ RSpec.describe Legion::Extensions::Llm::Ollama, '.discover_instances' do
     expect(discover).to eq({})
   end
 
-  it 'claims instances.default once the operator changes it' do
+  # InstanceKey reserves 'default' as an instance identity (lex-llm
+  # foundation): a modified instances.default can never be registered under
+  # its name, so it is skipped here — the actor and the fleet responder must
+  # agree on the claimable set (D3).
+  it 'skips a modified instances.default (default is a reserved instance identity)' do
     stub_settings(default: synthetic_default.merge(base_url: 'http://127.0.0.1:11500'))
 
-    expect(discover[:default]).to include(base_url: 'http://127.0.0.1:11500')
+    expect(discover).to eq({})
   end
 
   it 'skips instances with enabled: false' do
