@@ -12,10 +12,11 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     instance = settings.dig(:instances, :default)
 
     expect(settings).to include(enabled: true, provider_family: :ollama)
-    expect(instance).to include(endpoint: 'http://127.0.0.1:11434', default_model: 'qwen3.5:latest',
-                                tier: :local, transport: :http)
-    expect(instance).to include(fleet: hash_including(respond_to_requests: false),
-                                usage: hash_including(embedding: true))
+    expect(instance).to include(endpoint: 'http://127.0.0.1:11434', tier: :local, transport: :http)
+    expect(instance).not_to have_key(:default_model)
+    expect(instance).to include(fleet: hash_including(respond_to_requests: false))
+    expect(instance[:usage]).to include(inference: true)
+    expect(instance[:usage]).not_to have_key(:embedding)
   end
 
   it 'provides a registry_publisher backed by the shared base class' do
@@ -77,23 +78,21 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(models.first.capabilities).to include(:completion, :streaming, :tools)
   end
 
-  it 'publishes live readiness asynchronously through the registry publisher' do
+  it 'does not publish readiness through the legacy registry publisher (SSOT v3: publication is actor-owned)' do
     stub_registry_publisher
 
-    readiness = provider.readiness(live: true)
+    provider.readiness(live: true)
 
-    expect(registry_publisher).to have_received(:publish_readiness_async).with(readiness)
+    expect(registry_publisher).not_to have_received(:publish_readiness_async)
   end
 
-  it 'publishes discovered models asynchronously through the registry publisher' do
+  it 'does not publish models through the legacy registry publisher (SSOT v3: publication is actor-owned)' do
     stub_registry_publisher
     stub_model_discovery
 
-    models = provider.list_models
     provider.discover_offerings(live: true)
 
-    expect(registry_publisher).to have_received(:publish_models_async)
-      .with([models.first], readiness: hash_including(provider: :ollama, live: true))
+    expect(registry_publisher).not_to have_received(:publish_models_async)
   end
 
   it 'does not probe Ollama for uncached non-live offerings reads' do
@@ -164,7 +163,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
   describe '.discover_instances' do
     before do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive_messages(socket_open?: false, setting: nil)
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting).and_return(nil)
     end
 
     it 'normalizes configured instance endpoint aliases to base_url' do
@@ -174,7 +173,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
       expect(described_class.discover_instances[:lab]).to include(
         base_url: 'http://lab:11434',
-        tier: :direct,
+        tier: :local,
         capabilities: {},
         provider_capabilities: { streaming: true }
       )

@@ -2,8 +2,8 @@
 
 begin
   require 'legion/extensions/actors/subscription'
-rescue LoadError => e
-  warn(e.message) if $VERBOSE
+rescue LoadError
+  nil
 end
 
 unless defined?(Legion::Extensions::Actors::Subscription)
@@ -11,8 +11,8 @@ unless defined?(Legion::Extensions::Actors::Subscription)
 end
 
 require 'legion/extensions/llm/ollama'
+require 'legion/extensions/llm/ollama/runners/fleet_worker'
 require 'legion/extensions/llm/fleet/provider_responder'
-require 'legion/logging/helper'
 
 module Legion
   module Extensions
@@ -21,10 +21,11 @@ module Legion
         module Actor
           # Subscription actor for Ollama fleet request consumption.
           class FleetWorker < Legion::Extensions::Actors::Subscription
-            include Legion::Logging::Helper
-
+            # The Subscription dispatch path (use_runner? == false) calls
+            # runner_class.send(fn, **message) — a String cannot be send-ed,
+            # so the runner must be the resolved module constant.
             def runner_class
-              'Legion::Extensions::Llm::Ollama::Runners::FleetWorker'
+              Legion::Extensions::Llm::Ollama::Runners::FleetWorker
             end
 
             def runner_function
@@ -36,9 +37,7 @@ module Legion
             end
 
             def enabled?
-              enabled = Legion::Extensions::Llm::Fleet::ProviderResponder.enabled_for?(Ollama.discover_instances)
-              log.debug { "ollama fleet worker actor enabled=#{enabled}" }
-              enabled
+              Legion::Extensions::Llm::Fleet::ProviderResponder.enabled_for?(Ollama.discover_instances)
             end
           end
         end

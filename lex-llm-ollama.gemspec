@@ -25,7 +25,9 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency 'legion-json', '>= 1.2.1'
   spec.add_dependency 'legion-logging', '>= 1.3.2'
-  spec.add_dependency 'legion-settings', '>= 1.3.14'
+  spec.add_dependency 'legion-settings', '>= 1.4.2'
   spec.add_dependency 'legion-transport', '>= 1.4.14'
-  spec.add_dependency 'lex-llm', '>= 0.6.9'
+  # 0.7.1 carries the name-identity InstanceKey (instance_id = config name +
+  # secondary physical_id field) that the SSOT v3 discovery actor publishes.
+  spec.add_dependency 'lex-llm', '>= 0.7.1'
 end

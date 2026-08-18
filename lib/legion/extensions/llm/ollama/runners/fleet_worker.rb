@@ -2,7 +2,6 @@
 
 require 'legion/extensions/llm/fleet/provider_responder'
 require 'legion/extensions/llm/ollama'
-require 'legion/logging/helper'
 
 module Legion
   module Extensions
@@ -10,25 +9,23 @@ module Legion
       module Ollama
         module Runners
           # Runner entrypoint for Ollama fleet request execution.
+          #
+          # The Subscription dispatch path invokes this as
+          # runner_class.send(fn, **message) where message is the fleet
+          # request envelope merged with transport metadata (routing_key,
+          # message_id, headers, ...). The responder parses the envelope out
+          # of that hash; unknown keys are inert.
           module FleetWorker
-            extend Legion::Logging::Helper
-
             module_function
 
-            def handle_fleet_request(payload, delivery: nil, properties: nil)
-              payload_keys = payload.respond_to?(:keys) ? payload.keys.join(',') : payload.class
-              log.debug do
-                "ollama fleet worker handing off request payload_keys=#{payload_keys} " \
-                  "delivery=#{!delivery.nil?} properties=#{!properties.nil?}"
-              end
-
+            def handle_fleet_request(**opts)
               Legion::Extensions::Llm::Fleet::ProviderResponder.call(
-                payload: payload,
+                payload: opts,
                 provider_family: Ollama::PROVIDER_FAMILY,
                 provider_class: Ollama::Provider,
                 provider_instances: -> { Ollama.discover_instances },
-                delivery: delivery,
-                properties: properties
+                delivery: opts[:delivery],
+                properties: opts[:properties]
               )
             end
           end

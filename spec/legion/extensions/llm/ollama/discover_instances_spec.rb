@@ -6,58 +6,89 @@ RSpec.describe Legion::Extensions::Llm::Ollama, '.discover_instances' do
   subject(:discover) { described_class.discover_instances }
 
   let(:credential_sources) { Legion::Extensions::Llm::CredentialSources }
+  let(:synthetic_default) { described_class.default_settings.dig(:instances, :default) }
 
   before do
-    allow(credential_sources).to receive_messages(socket_open?: false, setting: nil)
+    allow(credential_sources).to receive(:setting).and_call_original
+    allow(credential_sources).to receive(:setting)
+      .with(:extensions, :llm, :ollama, :instances)
+      .and_return(nil)
   end
 
-  it 'returns the local instance when the socket probe succeeds' do
-    stub_socket_open(true)
+  it 'normalizes configured instance endpoint aliases to base_url' do
+    stub_settings(lab: { endpoint: 'http://lab:11434' })
 
-    expect(discover).to include(local: local_instance_config)
+    expect(discover[:lab]).to include(
+      base_url: 'http://lab:11434',
+      tier: :local,
+      capabilities: {},
+      provider_capabilities: { streaming: true }
+    )
   end
 
-  it 'omits the local instance when the socket probe fails' do
-    stub_socket_open(false)
+  it 'supports multiple configured instances, each with its own endpoint' do
+    stub_settings(
+      alpha: { base_url: 'http://alpha:11434' },
+      beta: { base_url: 'http://beta:11434' }
+    )
 
-    expect(discover).not_to have_key(:local)
+    expect(discover.keys).to contain_exactly(:alpha, :beta)
+    expect(discover[:alpha][:base_url]).to eq('http://alpha:11434')
+    expect(discover[:beta][:base_url]).to eq('http://beta:11434')
   end
 
-  it 'returns a settings-configured instance with tier :direct' do
-    stub_settings(gpu_box: { base_url: 'http://gpu:11434' })
+  it 'includes the default template in configured discovery' do
+    stub_settings(default: synthetic_default)
 
-    expect(discover).to include(gpu_box: settings_instance_config('http://gpu:11434'))
+    expect(described_class.discover_instances).to have_key(:default)
   end
 
-  it 'returns both local and settings instances when both are available' do
-    stub_socket_open(true)
-    stub_settings(remote: { base_url: 'http://remote:11434' })
+  # A configured (non-template) instances.default — a real operator entry
+  # with real values — is NOT the synthetic phantom: v2 parity, 'default'
+  # accepted as a plain instance label. The provider layer passes it to the
+  # claim path; whether the foundation accepts the name is a lex-llm
+  # InstanceKey contract, not a provider-layer decision (asserted on the
+  # discover/claimable set, not an end-to-end claim).
+  it 'passes a configured (non-template) instances.default to the claim path' do
+    stub_settings(default: synthetic_default.merge(base_url: 'http://127.0.0.1:11500'))
 
-    expect(discover.keys).to contain_exactly(:local, :remote)
-    expect(discover[:local][:tier]).to eq(:local)
-    expect(discover[:remote][:tier]).to eq(:direct)
+    expect(discover).to have_key(:default)
+    expect(discover[:default][:base_url]).to eq('http://127.0.0.1:11500')
+    expect(discover[:default]).to include(
+      capabilities: {},
+      provider_capabilities: { streaming: true }
+    )
   end
 
-  it 'returns an empty hash when no local server and no settings exist' do
+  it 'skips instances with enabled: false' do
+    stub_settings(gpu_box: { base_url: 'http://gpu:11434', enabled: false })
+
     expect(discover).to eq({})
   end
 
-  def stub_socket_open(result)
+  it 'skips instances with no endpoint (no fallback identity)' do
+    stub_settings(no_endpoint: { tier: :local })
+
+    expect(discover).to eq({})
+  end
+
+  it 'returns an empty hash when no instances are configured (no phantom local instance)' do
+    expect(discover).to eq({})
+  end
+
+  it 'never fabricates an instance from a port probe' do
+    # The legacy discover_local_instance socket probe is gone: with no
+    # configured instances, nothing is registered even if a server happens
+    # to listen on 127.0.0.1:11434.
     allow(credential_sources).to receive(:socket_open?)
-      .with('127.0.0.1', 11_434, timeout: 0.1).and_return(result)
+
+    expect(discover).to eq({})
+    expect(credential_sources).not_to have_received(:socket_open?)
   end
 
   def stub_settings(instances)
     allow(credential_sources).to receive(:setting)
       .with(:extensions, :llm, :ollama, :instances)
       .and_return(instances)
-  end
-
-  def local_instance_config
-    { base_url: 'http://127.0.0.1:11434', tier: :local, capabilities: {}, provider_capabilities: { streaming: true } }
-  end
-
-  def settings_instance_config(base_url)
-    { base_url: base_url, tier: :direct, capabilities: {}, provider_capabilities: { streaming: true } }
   end
 end

@@ -50,7 +50,7 @@ module Legion
 
           # Render a canonical request into Ollama /api/chat wire payload.
           def render_request(request)
-            model = request.metadata&.dig(:model) || 'default'
+            model = request.metadata&.dig(:model)
             messages = format_messages(request)
             payload = {
               model: model,
