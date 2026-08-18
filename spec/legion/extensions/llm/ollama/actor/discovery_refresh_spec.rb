@@ -80,14 +80,22 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
       expect(instance_ids).to eq(['alpha'])
     end
 
-    it 'skips an operator-modified instances.default (default is a reserved identity)' do
-      configure_instances(default: synthetic_default.merge(base_url: 'http://127.0.0.1:11500'))
+    it 'keeps the discovery pass alive when the foundation rejects the configured default claim' do
+      # The provider layer passes a configured (non-template) instances.default
+      # to the claim path (v2 parity). Whether the foundation accepts the name
+      # is a lex-llm InstanceKey contract, not a provider-layer decision:
+      # under the current lex-llm floor the claim raises, the actor logs it,
+      # and the rest of the pass still runs — a claim failure for one
+      # instance must not poison the others.
+      configure_instances(
+        default: synthetic_default.merge(base_url: 'http://127.0.0.1:11500'),
+        alpha: { base_url: 'http://127.0.0.1:11435', tier: :local }
+      )
       stub_boundaries(readiness_result: healthy)
 
       actor.manual
 
-      expect(instance_ids).to be_empty
-      expect(registry.snapshot.publication_status(instance_key: key_for('127.0.0.1:11500'))).to be_nil
+      expect(instance_ids).to include('alpha')
     end
 
     it 'skips disabled and endpoint-less instances' do
