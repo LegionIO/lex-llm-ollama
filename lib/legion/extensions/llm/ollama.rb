@@ -69,9 +69,9 @@ module Legion
         # Only instances the operator actually configured are claimable.
         # The synthetic instances.default section (provider_settings nests
         # the extension's own instance defaults there) is skipped with a
-        # warn while it is still the unmodified extension default — an
-        # unconfigured phantom must never be auto-registered, and a
-        # localhost endpoint is never a fallback identity.
+        # once-per-boot warn while it is still the unmodified extension
+        # default — an unconfigured phantom must never be auto-registered,
+        # and a localhost endpoint is never a fallback identity.
         def self.claimable_instance_config(name:, config:)
           return nil unless config.is_a?(Hash)
 
@@ -79,7 +79,7 @@ module Legion
           return nil if normalized[:enabled] == false
 
           if unconfigured_default?(name: name, normalized: normalized)
-            log.warn("[ollama][discovery] action=skip_instance instance=#{name} reason=synthetic_default")
+            warn_unconfigured_default(name: name)
             return nil
           end
 
@@ -103,6 +103,18 @@ module Legion
           @normalized_synthetic_default_instance ||= normalize_instance_config(
             default_settings.dig(:instances, :default) || {}
           )
+        end
+
+        # Warns once per boot so the skip is loud without spamming every
+        # discovery tick: both the actor and the fleet responder run this
+        # path on a timer, an unconfigured provider is the normal state,
+        # and the first skip is the operator signal (default is still the
+        # unmodified template — set a real key to publish it).
+        def self.warn_unconfigured_default(name:)
+          return if @unconfigured_default_warned
+
+          @unconfigured_default_warned = true
+          log.warn("[ollama][discovery] action=skip_instance instance=#{name} reason=synthetic_default")
         end
 
         def self.normalize_instance_config(config)

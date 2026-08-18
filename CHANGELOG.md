@@ -24,6 +24,7 @@
 - **Embedding models now authoritatively exclude chat** — an embedding model published `chat: :supported`/`stream_chat: :supported`, so a plain chat request could be misrouted to an embedding-only model. The evidence builder now branches on `embed_supported` (matching bedrock): embedding models publish `chat`/`stream_chat` as `:unsupported` and `embed` as `:supported`; chat models publish `embed` as `:unsupported`.
 - **lex-llm 0.7.1 floor** — the gemspec now requires `lex-llm >= 0.7.1`: the name-identity `InstanceKey` with the secondary `physical_id` field and the reserved-`default` rejection (0.7.0's `InstanceKey` has no `physical_id` and accepts any instance_id).
 - **Single actor registration** — the provider module no longer extends Core at file level, so the boot-time submodule walk skips it and the gem's own top-level extension load is the sole actor registration (eliminates the double-claim / FencedPublisherError).
+- **Synthetic-default skip warn** — the `reason=synthetic_default` skip warn now fires once per boot instead of every discovery tick (was permanent WARN noise).
 
 ## [0.3.2] - 2026-08-13
 

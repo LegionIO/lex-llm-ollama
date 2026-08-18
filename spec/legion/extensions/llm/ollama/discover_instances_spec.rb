@@ -39,11 +39,24 @@ RSpec.describe Legion::Extensions::Llm::Ollama, '.discover_instances' do
 
   # D3: the synthetic instances.default section (the extension's own instance
   # defaults, nested by provider_settings) is an unconfigured phantom while it
-  # is unmodified — it must never be auto-registered.
+  # is unmodified — it must never be auto-registered. The skip warn fires
+  # exactly once per boot (not every discovery tick): the first skip is the
+  # operator signal, the rest is steady state.
   it 'skips the synthetic instances.default while it is the unmodified extension default' do
+    # The throttle flag is process-wide (module singleton) — reset it so this
+    # spec is order-independent of any earlier skip in the same process.
+    described_class.instance_variable_set(:@unconfigured_default_warned, false)
     stub_settings(default: synthetic_default)
 
-    expect(discover).to eq({})
+    expect(described_class.discover_instances).to eq({})
+    # First skip: the operator signal — the throttle latches.
+    expect(described_class.instance_variable_get(:@unconfigured_default_warned)).to be(true)
+
+    # Later ticks: the skip repeats silently (no per-tick WARN spam).
+    expect(described_class.discover_instances).to eq({})
+    expect(described_class.instance_variable_get(:@unconfigured_default_warned)).to be(true)
+    expect(described_class.discover_instances).to eq({})
+    expect(described_class.instance_variable_get(:@unconfigured_default_warned)).to be(true)
   end
 
   # A configured (non-template) instances.default — a real operator entry
