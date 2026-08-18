@@ -78,11 +78,6 @@ module Legion
           normalized = normalize_instance_config(config)
           return nil if normalized[:enabled] == false
 
-          if unconfigured_default?(name: name, normalized: normalized)
-            warn_unconfigured_default(name: name)
-            return nil
-          end
-
           unless normalized[:base_url].is_a?(String) && !normalized[:base_url].strip.empty?
             log.warn("[ollama][discovery] action=skip_instance instance=#{name} reason=missing_endpoint")
             return nil
@@ -103,18 +98,6 @@ module Legion
           @normalized_synthetic_default_instance ||= normalize_instance_config(
             default_settings.dig(:instances, :default) || {}
           )
-        end
-
-        # Warns once per boot so the skip is loud without spamming every
-        # discovery tick: both the actor and the fleet responder run this
-        # path on a timer, an unconfigured provider is the normal state,
-        # and the first skip is the operator signal (default is still the
-        # unmodified template — set a real key to publish it).
-        def self.warn_unconfigured_default(name:)
-          return if @unconfigured_default_warned
-
-          @unconfigured_default_warned = true
-          log.warn("[ollama][discovery] action=skip_instance instance=#{name} reason=synthetic_default")
         end
 
         def self.normalize_instance_config(config)
