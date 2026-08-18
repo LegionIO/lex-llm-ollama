@@ -12,7 +12,6 @@ module Legion
     module Llm
       # Ollama provider extension namespace.
       module Ollama
-        extend ::Legion::Extensions::Core
         extend Legion::Logging::Helper
         extend Legion::Extensions::Llm::AutoRegistration
 
