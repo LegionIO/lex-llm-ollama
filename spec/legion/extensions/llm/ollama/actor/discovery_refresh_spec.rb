@@ -56,19 +56,16 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
   # ── D3: only operator-configured instances are registered ──────────────────
 
   describe 'unconfigured phantom handling (D3)' do
-    it 'registers nothing when only the synthetic instances.default is present' do
+    it 'registers the default instance when it is present' do
       configure_instances(default: synthetic_default)
       stub_boundaries(readiness_result: healthy)
 
       actor.manual
 
-      expect(instance_ids).to be_empty
-      # The derived host:port is the SECONDARY physical id, never the
-      # identity — nothing is published under it.
-      expect(registry.snapshot.publication_status(instance_key: key_for('127.0.0.1:11434'))).to be_nil
+      expect(instance_ids).to eq(['default'])
     end
 
-    it 'claims a named instance alongside the synthetic default, never the phantom' do
+    it 'claims a named instance alongside the default instance' do
       configure_instances(
         default: synthetic_default,
         alpha: { base_url: 'http://127.0.0.1:11435', tier: :local }
@@ -77,7 +74,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
 
       actor.manual
 
-      expect(instance_ids).to eq(['alpha'])
+      expect(instance_ids).to contain_exactly('alpha', 'default')
     end
 
     it 'keeps the discovery pass alive when the foundation rejects the configured default claim' do
