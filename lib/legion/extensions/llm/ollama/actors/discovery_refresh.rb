@@ -680,11 +680,11 @@ module Legion
               instance_id = name.to_s
               physical_id = derive_physical_id(instance_cfg: instance_cfg)
               instance_key = build_instance_key(instance_id: instance_id, physical_id: physical_id)
+              offerings = discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
               components = build_instance_components(
                 name: name.to_sym, instance_id: instance_id, physical_id: physical_id,
                 instance_cfg: instance_cfg, instance_key: instance_key
               )
-              offerings = discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
               state = {
                 name: name.to_sym,
                 instance_id: instance_id,

@@ -135,6 +135,33 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
       expect { build_draft }.to raise_error(ArgumentError, /weight component must be an Integer >= 0/)
     end
 
+    it 'does not claim or construct a callable until startup weights validate' do
+      provider_settings[:weight] = false
+      configure_alpha
+      stub_catalog
+      publisher = actor.send(:publisher)
+      callable_class = Legion::Extensions::Llm::Ollama::Actor::OllamaCallable
+      allow(publisher).to receive(:claim_instance).and_call_original
+      allow(callable_class).to receive(:new).and_call_original
+
+      actor.manual
+
+      expect(registry.snapshot.publication_status(instance_key: alpha_key)).to be_nil
+      expect(registry.snapshot.instance(instance_key: alpha_key)).to be_nil
+      expect(actor.instance_variable_get(:@instance_states)).to be_empty
+      expect(publisher).not_to have_received(:claim_instance)
+      expect(callable_class).not_to have_received(:new)
+
+      provider_settings[:weight] = 110
+      actor.manual
+
+      expect(publisher).to have_received(:claim_instance).once
+      expect(callable_class).to have_received(:new).once
+      expect(registry.snapshot.publication_status(instance_key: alpha_key).state).to eq(:complete)
+      expect(registry.snapshot.instance(instance_key: alpha_key).availability.state).to eq(:available)
+      expect(actor.instance_variable_get(:@instance_states).keys).to eq([:alpha])
+    end
+
     it 'keeps sequence zero across ten unchanged ordinary passes' do
       configure_alpha
       stub_catalog
