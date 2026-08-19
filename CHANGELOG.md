@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **Complete discovery change detection** — ordinary discovery now compares the complete stable `OfferingDraft#to_h` contract as an order-independent, duplicate-count-preserving multiset. Only evidence `observed_at` telemetry is excluded; quota domains, metadata, publication source, scalar evidence authority, and every other draft field trigger one atomic replacement when changed.
 - **Startup claim atomicity** — initial model discovery and write-time weight validation now complete before Ollama constructs a callable, coordinator, or Registry claim, so malformed settings cannot leave an orphan `:initializing` publication status or token; the next corrected discovery pass claims and activates the instance exactly once without a restart or operator repair.
 - **SSOT v3 write-time weights** — Ollama drafts now publish the validated four-axis weight pair from live settings, and the existing discovery cadence atomically reconciles weight-only changes, initialization/activation races, sequence/cache updates, removals, and dormant configured-weight logging through lex-llm 0.7.6. No Settings callback, reload, reset, migration, restart, or operator action is introduced.
 - **D14 callable-path wire conformance** — the actual `OllamaCallable#chat` path now accepts Task-01 canonical folded messages and renders the authoritative system content as the leading Ollama `role: system` message; legacy message tool-result handling remains intact.

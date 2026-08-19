@@ -513,54 +513,40 @@ module Legion
 
           # ── Offering change comparison helpers ───────────────────────────────
           module OfferingComparison
+            SCALAR_EVIDENCE_FIELDS = %i[
+              context_evidence max_output_evidence embedding_dimensions_evidence
+              model_revision_evidence tokenizer_evidence
+            ].freeze
+
             private
 
-            # Compare on identity and evidence status, not Data#==: every draft
-            # embeds a fresh Time.now observed_at, so Data equality is false
-            # across ticks even when the model set and capabilities are
-            # unchanged (replace churn on every tick).
+            # Every draft embeds fresh evidence observed_at telemetry. Compare
+            # the complete stable draft contract as a multiset so catalog order
+            # is irrelevant while duplicate counts remain significant.
             def offerings_changed?(previous:, current:)
-              current.map { |draft| offering_signature(draft) } !=
-                previous.map { |draft| offering_signature(draft) }
+              offering_multiset(current) != offering_multiset(previous)
             end
 
-            def offering_signature(draft)
-              [
-                draft.provider_native_key,
-                draft.model,
-                draft.tier,
-                operation_signature(draft),
-                capability_signature(draft),
-                value_signature(draft),
-                draft.weight_inputs,
-                draft.base_weight
-              ]
+            def offering_multiset(offerings)
+              offerings.map { |draft| stable_offering_state(draft) }.tally
             end
 
-            def operation_signature(draft)
-              draft.operation_evidence.values.map do |evidence|
-                [evidence.operation, evidence.status, evidence.source]
-              end.sort
+            def stable_offering_state(draft)
+              state = draft.to_h
+              state[:operation_evidence] = stable_evidence_map(draft.operation_evidence)
+              state[:capability_evidence] = stable_evidence_map(draft.capability_evidence)
+              SCALAR_EVIDENCE_FIELDS.each do |field|
+                state[field] = stable_evidence(draft.public_send(field))
+              end
+              state
             end
 
-            def capability_signature(draft)
-              draft.capability_evidence.values.map do |evidence|
-                [evidence.capability, evidence.status, evidence.source]
-              end.sort
+            def stable_evidence_map(evidence)
+              evidence.transform_values { |entry| stable_evidence(entry) }
             end
 
-            def value_signature(draft)
-              [
-                value_pair(draft.context_evidence),
-                value_pair(draft.max_output_evidence),
-                value_pair(draft.embedding_dimensions_evidence),
-                value_pair(draft.model_revision_evidence),
-                value_pair(draft.tokenizer_evidence)
-              ]
-            end
-
-            def value_pair(evidence)
-              [evidence.status, evidence.value]
+            def stable_evidence(evidence)
+              evidence.to_h.except(:observed_at)
             end
           end
 

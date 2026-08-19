@@ -72,6 +72,19 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
     )
   end
 
+  def authoritative_contract_variant(draft, field)
+    case field
+    when :quota_domains
+      draft.with(quota_domains: { chat: 'ollama-chat-v2' })
+    when :metadata
+      draft.with(metadata: draft.metadata.merge(catalog_revision: 'v2'))
+    when :publication_source
+      draft.with(publication_source: :provider_control_plane)
+    when :context_evidence
+      draft.with(context_evidence: draft.context_evidence.with(source: :default_false))
+    end
+  end
+
   describe 'write-time weights on the ordinary discovery cadence' do
     it 'stores the exact four-axis pair and product on each constructed draft' do
       provider_settings[:weight] = 110
@@ -171,6 +184,68 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh do
 
       expect(registry.snapshot.publication_status(instance_key: alpha_key).published_sequence).to eq(0)
       expect(alpha_state[:sequence]).to eq(0)
+    end
+
+    %i[quota_domains metadata publication_source context_evidence].each do |field|
+      it "publishes one Registry replacement for an authoritative #{field} change" do
+        configure_alpha
+        stub_catalog
+        actor.manual
+        previous = alpha_state.fetch(:offerings)
+        changed = previous.dup
+        changed[0] = authoritative_contract_variant(previous.first, field)
+        allow(actor).to receive(:discover_offerings_for_instance).and_return(changed)
+        publisher = actor.send(:publisher)
+        allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+
+        actor.manual
+
+        published = registry.snapshot.offerings_for(instance_key: alpha_key)
+                            .find { |offering| offering.model == changed.first.model }
+        expect(publisher).to have_received(:replace_instance_snapshot).once
+        expect(registry.snapshot.publication_status(instance_key: alpha_key).published_sequence).to eq(1)
+        expect(alpha_state[:sequence]).to eq(1)
+        expect(published.public_send(field)).to eq(changed.first.public_send(field))
+      end
+    end
+
+    it 'does not replace an equivalent two-offering catalog returned in reverse order' do
+      configure_alpha
+      allow(actor).to receive_messages(check_readiness: healthy, fetch_model_detail_safe: nil)
+      catalog = [
+        { name: 'qwen3:8b', digest: 'sha256:qwen' },
+        { name: 'llama3.1:8b', digest: 'sha256:llama' }
+      ]
+      allow(actor).to receive(:fetch_models).and_return(catalog, catalog.reverse)
+      publisher = actor.send(:publisher)
+      allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+
+      actor.manual
+      actor.manual
+
+      expect(publisher).not_to have_received(:replace_instance_snapshot)
+      expect(registry.snapshot.publication_status(instance_key: alpha_key).published_sequence).to eq(0)
+      expect(alpha_state[:sequence]).to eq(0)
+    end
+
+    it 'treats duplicate offering multiplicity as a significant ordinary-cadence change' do
+      configure_alpha
+      allow(actor).to receive_messages(check_readiness: healthy, fetch_model_detail_safe: nil)
+      catalog = [
+        { name: 'qwen3:8b', digest: 'sha256:qwen' },
+        { name: 'llama3.1:8b', digest: 'sha256:llama' }
+      ]
+      allow(actor).to receive(:fetch_models).and_return(catalog, catalog + [catalog.first])
+      publisher = actor.send(:publisher)
+      replacements = []
+      allow(publisher).to receive(:replace_instance_snapshot) { |**kwargs| replacements << kwargs }
+
+      actor.manual
+      actor.manual
+
+      expect(replacements.length).to eq(1)
+      expect(replacements.first.fetch(:offerings).length).to eq(3)
+      expect(alpha_state[:sequence]).to eq(1)
     end
 
     it 'logs each dormant model once, clears it on appearance, and logs its re-disappearance' do
