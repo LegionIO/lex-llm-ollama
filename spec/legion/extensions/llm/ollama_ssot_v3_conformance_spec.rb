@@ -35,6 +35,14 @@ class RecordingOllamaProvider
 
   def call_count = @calls.size
 
+  # The production Ollama::Provider inherits enforce_canonical_messages!
+  # from the lex-llm base (0.7.7); the OllamaCallable dispatch ops call it
+  # before delegating. Delegate to the real implementation so the callable's
+  # dispatch-boundary enforcement runs production code under test.
+  def enforce_canonical_messages!(messages)
+    base.enforce_canonical_messages!(messages)
+  end
+
   def chat(messages:, model:, **rest)
     record(:chat, messages: messages, model: model, **rest)
     { role: 'assistant', content: 'test response', model: model }
@@ -60,6 +68,10 @@ class RecordingOllamaProvider
   end
 
   private
+
+  def base
+    @base ||= Legion::Extensions::Llm::Ollama::Provider.new({})
+  end
 
   def record(operation, **args)
     @calls << { operation: operation, **args }
@@ -833,13 +845,13 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
     it 'delegates chat to the per-instance provider with rest passthrough' do
       provider = RecordingOllamaProvider.new
-      result = wrapped(provider).chat(messages: [{ role: 'user', content: 'hi' }],
-                                      model: 'qwen3:8b', temperature: 0.5)
+      messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')]
+      result = wrapped(provider).chat(messages: messages, model: 'qwen3:8b', temperature: 0.5)
 
       expect(result).to include(role: 'assistant')
       call = provider.calls.first
       expect(call[:operation]).to eq(:chat)
-      expect(call[:messages]).to eq([{ role: 'user', content: 'hi' }])
+      expect(call[:messages]).to eq(messages)
       expect(call[:temperature]).to eq(0.5)
     end
 
@@ -902,6 +914,12 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
     it 'lets dispatch errors propagate unrescued (errors escape chat for classification)' do
       raising = Class.new do
+        # Part of the production provider interface the callable checks
+        # before delegating (lex-llm 0.7.7 base); delegate to the real code.
+        def enforce_canonical_messages!(messages)
+          Legion::Extensions::Llm::Ollama::Provider.new({}).enforce_canonical_messages!(messages)
+        end
+
         def chat(**)
           raise Faraday::ConnectionFailed, 'connection refused'
         end
@@ -915,6 +933,85 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
       expect(outcome.kind).to be_a(Symbol)
       expect(outcome.reason).to be_a(String)
+    end
+  end
+
+  # ─── Dispatch boundary regression guards (2026-08-19 incident) ─────────────
+  # SSOT v3 local dispatch passed executor Hash messages straight to the
+  # provider callable, bypassing the canonical contract; lenient
+  # provider-side re-canonicalization masked the bypass (25/25 failed openai
+  # dispatches). As of lex-llm 0.7.7 the fleet worker rehydrates wire
+  # messages to Canonical::Message, and this provider's callable + render
+  # seam reject plain-Hash input loudly — no hash tolerance, no
+  # re-canonicalization bridge. The Ollama wire format is unchanged.
+  describe 'dispatch boundary regression (2026-08-19)' do
+    let(:config) { ssot_harness.instance_configs[0] }
+    let(:provider) { Legion::Extensions::Llm::Ollama::Provider.new(config) }
+    let(:callable) { ssot_harness.build_callable(instance_config: config) }
+
+    # The exact shape the dispatch layer delivers: Canonical::Message
+    # objects, with the prompt-cache breakpoint riding as a first-class
+    # canonical member (lex-llm 0.7.7).
+    def canonical_request
+      [
+        Legion::Extensions::Llm::Canonical::Message.build(
+          role: :system, content: 'Be terse.', cache_control: { type: 'ephemeral' }
+        ),
+        Legion::Extensions::Llm::Canonical::Message.build(
+          role: :user, content: 'What is the capital of France?'
+        )
+      ]
+    end
+
+    # The 2026-08-19 defect class: plain-Hash messages from the executor,
+    # silently re-canonicalized provider-side before the fix.
+    def hash_request
+      [
+        { role: 'system', content: 'Be terse.', cache_control: { type: 'ephemeral' } },
+        { role: 'user', content: 'What is the capital of France?' }
+      ]
+    end
+
+    def render(messages)
+      provider.send(
+        :render_payload, messages,
+        tools: [], temperature: nil, model: 'qwen3:8b',
+        stream: false, schema: nil, thinking: nil, tool_prefs: nil
+      )
+    end
+
+    it 'renders canonical messages through the production render seam without leaking cache_control' do
+      # render_payload is the production render seam (Provider#complete ->
+      # render_payload); calling it directly keeps the example HTTP-free.
+      # Canonical input with a :cache_control member must render to the
+      # Ollama wire without the transport-only key.
+      wire = render(canonical_request)
+
+      expect(wire[:messages]).to eq(
+        [
+          { role: 'system', content: 'Be terse.' },
+          { role: 'user', content: 'What is the capital of France?' }
+        ]
+      )
+      wire[:messages].each { |m| expect(m).not_to have_key(:cache_control) }
+    end
+
+    it 'rejects plain Hash messages at the dispatch boundary instead of re-canonicalizing them' do
+      # The 2026-08-19 defect class: hash messages silently re-canonicalized
+      # provider-side masked the bypass. The boundary now rejects loudly at
+      # both the fleet callable and the render seam.
+      expect { callable.chat(messages: hash_request, model: 'qwen3:8b') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+      expect { render(hash_request) }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+    end
+
+    it 'keeps the Chat facade entry on provider-native Message objects' do
+      # The render seam accepts both dispatch-boundary object shapes:
+      # Canonical::Message (pipeline dispatch) and lex-llm Message (the
+      # provider-native Chat facade). Anything else is the bypass class.
+      message = Legion::Extensions::Llm::Message.new(role: :user, content: 'hello')
+      expect(render([message])[:messages]).to eq([{ role: 'user', content: 'hello' }])
     end
   end
 

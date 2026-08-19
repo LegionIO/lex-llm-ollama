@@ -310,6 +310,7 @@ module Legion
           end
 
           def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:)
+            enforce_render_messages!(messages)
             model_id = model.respond_to?(:id) ? model.id : model
             log.debug do
               "ollama provider rendering chat payload model=#{model_id} message_count=#{messages.size} " \
@@ -398,6 +399,23 @@ module Legion
           def merge_stream_tool_calls(chunks)
             merged = chunks.filter_map(&:tool_calls).reject(&:empty?).reduce({}, :merge)
             merged.empty? ? nil : merged
+          end
+
+          # Canonical boundary (N x N law): pipeline dispatch delivers
+          # Canonical::Message objects; the provider-native Chat facade
+          # delivers lex-llm Message. Both are object shapes this spoke
+          # renders to the Ollama wire. Plain Hashes are the bypass class
+          # (the 2026-08-19 incident, masked by lenient re-canonicalization)
+          # — reject loudly, never silently re-canonicalize.
+          def enforce_render_messages!(messages)
+            messages.each do |message|
+              next if message.is_a?(Canonical::Message)
+              next if message.is_a?(Legion::Extensions::Llm::Message)
+
+              raise ArgumentError,
+                    "ollama provider input must be Canonical::Message objects, got #{message.class} — " \
+                    'non-canonical message shapes must not cross the dispatch boundary'
+            end
           end
 
           def format_messages(messages)

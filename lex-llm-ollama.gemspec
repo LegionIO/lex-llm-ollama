@@ -27,6 +27,7 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'legion-logging', '>= 1.3.2'
   spec.add_dependency 'legion-settings', '>= 1.4.2'
   spec.add_dependency 'legion-transport', '>= 1.4.14'
-  # 0.7.6 adds write-time WeightSchema records and the atomic writer reconciler.
-  spec.add_dependency 'lex-llm', '>= 0.7.6'
+  # 0.7.7 adds Provider#enforce_canonical_messages! — the canonical dispatch
+  # boundary this provider's render seam and fleet callable enforce.
+  spec.add_dependency 'lex-llm', '>= 0.7.7'
 end
