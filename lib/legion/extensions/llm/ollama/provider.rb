@@ -405,7 +405,12 @@ module Legion
               content = message.content
               payload = { role: message.role.to_s, content: format_content(content) }
               payload[:images] = encoded_attachments(content) if content.respond_to?(:attachments)
-              payload[:tool_call_id] = message.tool_call_id if message.tool_result?
+              tool_result = if message.respond_to?(:tool_result?)
+                              message.tool_result?
+                            else
+                              message.role.to_sym == :tool
+                            end
+              payload[:tool_call_id] = message.tool_call_id if tool_result && message.respond_to?(:tool_call_id)
               payload
             end
           end
