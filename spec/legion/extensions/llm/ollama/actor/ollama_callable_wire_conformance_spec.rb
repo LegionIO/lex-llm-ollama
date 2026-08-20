@@ -30,7 +30,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Actor::OllamaCallable do
       Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
     ]
 
-    callable.chat(messages: messages, model: 'qwen3:8b')
+    callable.chat(messages, model: 'qwen3:8b')
 
     expect(captured.one?).to be(true)
     expect(captured.first[:path]).to eq('/api/chat')

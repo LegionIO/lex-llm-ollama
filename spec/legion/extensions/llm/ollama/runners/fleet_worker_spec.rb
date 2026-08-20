@@ -19,10 +19,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Runners::FleetWorker do
   end
   let(:delivery) { instance_double(FleetWorkerSpecDelivery) }
   let(:properties) { instance_double(FleetWorkerSpecProperties) }
-  let(:instances) { { local: { fleet: { respond_to_requests: true } } } }
 
-  it 'delegates fleet execution to the shared lex-llm responder helper' do
-    allow(Legion::Extensions::Llm::Ollama).to receive(:discover_instances).and_return(instances)
+  it 'delegates fleet execution to the shared lex-llm responder helper with an explicit registry' do
     allow(Legion::Extensions::Llm::Fleet::ProviderResponder).to receive(:call).and_return(:ok)
 
     result = described_class.handle_fleet_request(**message, delivery: delivery, properties: properties)
@@ -31,15 +29,13 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Runners::FleetWorker do
     expect(Legion::Extensions::Llm::Fleet::ProviderResponder).to have_received(:call).with(
       payload: message.merge(delivery: delivery, properties: properties),
       provider_family: :ollama,
-      provider_class: Legion::Extensions::Llm::Ollama::Provider,
-      provider_instances: satisfy { |resolver| resolver.call == instances },
+      registry: Legion::Extensions::Llm::Inventory::Registry,
       delivery: delivery,
       properties: properties
     )
   end
 
   it 'accepts the envelope-only kwargs shape (no transport metadata)' do
-    allow(Legion::Extensions::Llm::Ollama).to receive(:discover_instances).and_return(instances)
     allow(Legion::Extensions::Llm::Fleet::ProviderResponder).to receive(:call).and_return(:ok)
 
     described_class.handle_fleet_request(**message)
@@ -47,8 +43,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Runners::FleetWorker do
     expect(Legion::Extensions::Llm::Fleet::ProviderResponder).to have_received(:call).with(
       payload: message,
       provider_family: :ollama,
-      provider_class: Legion::Extensions::Llm::Ollama::Provider,
-      provider_instances: satisfy { |resolver| resolver.call == instances },
+      registry: Legion::Extensions::Llm::Inventory::Registry,
       delivery: nil,
       properties: nil
     )

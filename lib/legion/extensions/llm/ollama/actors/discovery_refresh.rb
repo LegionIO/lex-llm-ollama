@@ -18,7 +18,6 @@ end
 
 require 'legion/extensions/llm/ollama/provider'
 require 'legion/extensions/llm/inventory/publisher'
-require 'legion/extensions/llm/inventory/scoped_refresher'
 require 'legion/extensions/llm/inventory/identity'
 require 'legion/extensions/llm/inventory/records'
 require 'legion/extensions/llm/inventory/evidence'
@@ -971,12 +970,7 @@ module Legion
             private
 
             def publisher
-              @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(
-                provider_family: :ollama,
-                compatibility_adapter: Legion::Extensions::Llm::Inventory::ScopedRefresher::LegacyCoordinatorAdapter.new(
-                  provider_family: :ollama
-                )
-              )
+              @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama)
             end
           end
 
@@ -1006,23 +1000,26 @@ module Legion
             # Fleet and SelectionDispatch pass model as a RAW STRING (the
             # offering's model id). Ollama's render path is string-tolerant
             # (model.respond_to?(:id) ? model.id : model) for chat and embed,
-            # embed places the model verbatim in the Embedding response object,
+            # embed places the model verbatim in the 05 §3 embedding artifact,
             # and count_tokens ignores it — so the model passes through
             # UNWRAPPED on every op. Wrapping a raw string in Model::Info here
             # would serialize a Data object into the wire payload or the
             # response object (D15 per-op rule); Model::Info instances pass
             # through unchanged as well.
-            def chat(messages:, model:, **rest)
+            # 0.8.0 callable contract: messages is the positional canonical
+            # Array (the base Provider funnel and the fleet worker both call
+            # it that way); model: and the remaining params are kwargs.
+            def chat(messages, model:, **rest)
               # Canonical boundary (N x N law): pipeline dispatch delivers
-              # Canonical::Message objects only. Hash/legacy shapes are the
-              # bypass class — reject loudly, never coerce.
+              # Canonical::Message objects only. Hash shapes are the bypass
+              # class — reject loudly, never coerce.
               provider.enforce_canonical_messages!(messages)
-              provider.chat(messages: messages, model: model, **rest)
+              provider.chat(messages, model: model, **rest)
             end
 
-            def stream_chat(messages:, model:, **rest, &)
+            def stream_chat(messages, model:, **rest, &)
               provider.enforce_canonical_messages!(messages)
-              provider.stream_chat(messages: messages, model: model, **rest, &)
+              provider.stream_chat(messages, model: model, **rest, &)
             end
 
             def embed(text:, model:, **rest)

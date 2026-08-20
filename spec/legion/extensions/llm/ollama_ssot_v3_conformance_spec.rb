@@ -43,19 +43,22 @@ class RecordingOllamaProvider
     base.enforce_canonical_messages!(messages)
   end
 
-  def chat(messages:, model:, **rest)
+  # 0.8.0 callable contract: messages is the positional canonical Array.
+  def chat(messages, model:, **rest)
     record(:chat, messages: messages, model: model, **rest)
-    { role: 'assistant', content: 'test response', model: model }
+    Legion::Extensions::Llm::Canonical::Response.build(text: 'test response', model: model, stop_reason: :end_turn)
   end
 
-  def stream_chat(messages:, model:, **rest, &)
+  def stream_chat(messages, model:, **rest, &blk)
     record(:stream_chat, messages: messages, model: model, **rest)
-    { role: 'assistant', content: 'streamed response', model: model }
+    blk&.call(Legion::Extensions::Llm::Canonical::Chunk.text_delta(delta: 'streamed response', request_id: nil))
+    blk&.call(Legion::Extensions::Llm::Canonical::Chunk.done(request_id: nil))
+    nil
   end
 
   def embed(text:, model:, **rest)
     record(:embed, text: text, model: model, **rest)
-    { embedding: [0.1, 0.2, 0.3], model: model }
+    { text: text, model: model, embedding: [0.1, 0.2, 0.3] }
   end
 
   def count_tokens(messages:, model:, **rest)
@@ -846,13 +849,14 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     it 'delegates chat to the per-instance provider with rest passthrough' do
       provider = RecordingOllamaProvider.new
       messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')]
-      result = wrapped(provider).chat(messages: messages, model: 'qwen3:8b', temperature: 0.5)
+      params = Legion::Extensions::Llm::Canonical::Params.build(temperature: 0.5)
+      result = wrapped(provider).chat(messages, model: 'qwen3:8b', params: params)
 
-      expect(result).to include(role: 'assistant')
+      expect(result).to be_a(Legion::Extensions::Llm::Canonical::Response)
       call = provider.calls.first
       expect(call[:operation]).to eq(:chat)
       expect(call[:messages]).to eq(messages)
-      expect(call[:temperature]).to eq(0.5)
+      expect(call[:params]).to eq(params)
     end
 
     # D15 PER-OP: Ollama's render path is string-tolerant
@@ -863,8 +867,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     # serialize a Data object into the wire payload or the response object.
     it 'passes the fleet raw-string model through unwrapped on every op (D15 per-op)' do
       provider = RecordingOllamaProvider.new
-      wrapped(provider).chat(messages: [], model: 'qwen3:8b')
-      wrapped(provider).stream_chat(messages: [], model: 'qwen3:8b')
+      wrapped(provider).chat([], model: 'qwen3:8b')
+      wrapped(provider).stream_chat([], model: 'qwen3:8b')
       wrapped(provider).embed(text: 'hello', model: 'nomic-embed-text')
       wrapped(provider).count_tokens(messages: [], model: 'qwen3:8b')
 
@@ -879,7 +883,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       provider = RecordingOllamaProvider.new
       info = Legion::Extensions::Llm::Model::Info.new(id: 'qwen3:8b', provider: :ollama)
 
-      wrapped(provider).chat(messages: [], model: info)
+      wrapped(provider).chat([], model: info)
 
       expect(provider.calls.first[:model]).to equal(info)
     end
@@ -887,14 +891,14 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     # D15 PER-OP against the REAL render path: the production Provider's
     # render methods must accept the dispatch's raw string model (no
     # NoMethodError on model.id anywhere in the chat/stream_chat/embed
-    # render paths). Messages are the Message objects the dispatch layer
-    # hands the provider; the model is the raw string under test.
+    # render paths). Messages are the Canonical::Message objects the
+    # dispatch layer hands the provider; the model is the raw string under test.
     it 'drives the real render path with a raw string model (D15 per-op)' do
       provider = Legion::Extensions::Llm::Ollama::Provider.new(base_url: 'http://127.0.0.1:11437')
-      message = Legion::Extensions::Llm::Message.new(role: :user, content: 'hi')
+      message = Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')
       chat_payload = provider.send(
         :render_payload, [message],
-        tools: [], temperature: nil, model: 'qwen3:8b',
+        tools: [], params: nil, model: 'qwen3:8b',
         stream: false, schema: nil, thinking: nil, tool_prefs: nil
       )
       expect(chat_payload[:model]).to eq('qwen3:8b')
@@ -915,16 +919,16 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     it 'lets dispatch errors propagate unrescued (errors escape chat for classification)' do
       raising = Class.new do
         # Part of the production provider interface the callable checks
-        # before delegating (lex-llm 0.7.7 base); delegate to the real code.
+        # before delegating (0.8.0 base); delegate to the real code.
         def enforce_canonical_messages!(messages)
           Legion::Extensions::Llm::Ollama::Provider.new({}).enforce_canonical_messages!(messages)
         end
 
-        def chat(**)
+        def chat(_messages, **_rest)
           raise Faraday::ConnectionFailed, 'connection refused'
         end
       end.new
-      expect { wrapped(raising).chat(messages: [], model: 'qwen3:8b') }
+      expect { wrapped(raising).chat([], model: 'qwen3:8b') }
         .to raise_error(Faraday::ConnectionFailed)
     end
 
@@ -975,7 +979,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     def render(messages)
       provider.send(
         :render_payload, messages,
-        tools: [], temperature: nil, model: 'qwen3:8b',
+        tools: [], params: nil, model: 'qwen3:8b',
         stream: false, schema: nil, thinking: nil, tool_prefs: nil
       )
     end
@@ -998,21 +1002,75 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
     it 'rejects plain Hash messages at the dispatch boundary instead of re-canonicalizing them' do
       # The 2026-08-19 defect class: hash messages silently re-canonicalized
-      # provider-side masked the bypass. The boundary now rejects loudly at
-      # both the fleet callable and the render seam.
-      expect { callable.chat(messages: hash_request, model: 'qwen3:8b') }
+      # provider-side masked the bypass. In 0.8.0 the boundary rejects loudly
+      # at both the fleet callable (shared-helper call) and the base funnel
+      # (central enforcement, 08 F2) — no render-seam re-implementation.
+      expect { callable.chat(hash_request, model: 'qwen3:8b') }
         .to raise_error(ArgumentError, /Canonical::Message/)
-      expect { render(hash_request) }
+      expect { provider.chat(hash_request, model: 'qwen3:8b') }
         .to raise_error(ArgumentError, /Canonical::Message/)
     end
 
-    it 'keeps the Chat facade entry on provider-native Message objects' do
-      # The render seam accepts both dispatch-boundary object shapes:
-      # Canonical::Message (pipeline dispatch) and lex-llm Message (the
-      # provider-native Chat facade). Anything else is the bypass class.
-      message = Legion::Extensions::Llm::Message.new(role: :user, content: 'hello')
-      expect(render([message])[:messages]).to eq([{ role: 'user', content: 'hello' }])
+    it 'runs the base shared enforce helper (no per-provider re-implementation)' do
+      expect(
+        Legion::Extensions::Llm::Ollama::Provider.instance_method(:enforce_canonical_messages!).owner
+      ).to eq(Legion::Extensions::Llm::Provider)
     end
+  end
+
+  # ─── 0.8.0 boundary kit groups (09 B1/B2) — the real callable boundary ────
+  # B1 (central enforcement) and B2 (canonical outputs, asserted by type) run
+  # against the PRODUCTION OllamaCallable wrapping a real Ollama::Provider —
+  # the offline fake replaces only the Provider's HTTP connection, so the
+  # production render_payload / parse_completion_response / stream_response
+  # boundaries all execute (the documented matrix blind spot, closed at the
+  # kit level: provider-side examples must traverse render/parse).
+  describe '0.8.0 boundary conformance (kit B1/B2)' do
+    def build_real_callable
+      stream_lines = [
+        Legion::JSON.dump('message' => { 'role' => 'assistant', 'content' => 'streamed' }, 'model' => 'qwen3:8b'),
+        Legion::JSON.dump(
+          'message' => { 'role' => 'assistant', 'content' => '' }, 'model' => 'qwen3:8b',
+          'done' => true, 'done_reason' => 'stop', 'prompt_eval_count' => 5, 'eval_count' => 3
+        )
+      ].map { |line| "#{line}\n" }
+      connection = Object.new
+      connection.define_singleton_method(:post) do |_path, payload, &request_block|
+        if payload[:stream]
+          req = Struct.new(:headers, :options).new({}, Struct.new(:on_data).new(nil))
+          request_block&.call(req)
+          env = Faraday::Env.new
+          env.status = 200
+          stream_lines.each { |line| req.options.on_data.call(line, line.bytesize, env) }
+          Struct.new(:body).new('')
+        else
+          request_block&.call(Struct.new(:headers).new({}))
+          Struct.new(:body).new(
+            {
+              'model' => 'qwen3:8b',
+              'message' => { 'role' => 'assistant', 'content' => 'ok' },
+              'done' => true,
+              'done_reason' => 'stop',
+              'prompt_eval_count' => 2,
+              'eval_count' => 1
+            }
+          )
+        end
+      end
+      connection.define_singleton_method(:close) { true }
+      provider = Legion::Extensions::Llm::Ollama::Provider.new(base_url: 'http://127.0.0.1:11435')
+      provider.instance_variable_set(:@connection, connection)
+      Legion::Extensions::Llm::Ollama::Actor::OllamaCallable.new(
+        instance_cfg: { base_url: 'http://127.0.0.1:11435' },
+        logger: Logger.new(File::NULL),
+        provider: provider
+      )
+    end
+
+    let(:callable) { build_real_callable }
+
+    it_behaves_like 'B1 — central canonical enforcement (08 F2)'
+    it_behaves_like 'B2 — canonical outputs (05 O5, 08 R2)'
   end
 
   # ─── ReadinessResult contract ───────────────────────────────────────────────

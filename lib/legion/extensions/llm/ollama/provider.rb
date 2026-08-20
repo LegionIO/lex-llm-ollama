@@ -1,6 +1,5 @@
 # frozen_string_literal: true
 
-require 'uri'
 require 'legion/extensions/llm'
 require 'legion/logging/helper'
 
@@ -86,20 +85,6 @@ module Legion
             end
           end
 
-          def discover_offerings(live: false, raise_on_unreachable: false, **filters)
-            return filter_cached_offerings(Array(@cached_offerings), filters) unless live
-
-            provider_health = health(live:)
-            @cached_offerings = discover_live_offerings(filters, provider_health, live:)
-            log_discover_complete(@cached_offerings)
-            @cached_offerings
-          rescue Faraday::ConnectionFailed, Faraday::TimeoutError => e
-            log.warn("[#{slug}] instance=#{provider_instance_id} unreachable: #{e.message}")
-            raise if raise_on_unreachable
-
-            []
-          end
-
           def show_model(model)
             log.debug { "ollama provider fetching model details model=#{model}" }
             connection.post(show_model_url, { model: model }).body
@@ -129,148 +114,6 @@ module Legion
 
           private
 
-          def required_instance_id
-            # Prefer explicit instance_id from provider config.
-            return config.instance_id if config.respond_to?(:instance_id) && config.instance_id
-
-            # Derive a stable instance_id from the endpoint URL so the exact-instance
-            # contract is maintained even on the legacy provider path.
-            # The :default symbol is never substituted; derivation replaces that fallback.
-            uri = URI.parse(api_base.to_s)
-            "#{uri.host || '127.0.0.1'}:#{uri.port || 11_434}"
-          rescue URI::InvalidURIError => e
-            handle_exception(e, level: :warn, operation: 'ollama.provider.derive_instance_id')
-            raise ArgumentError, "[ollama] cannot derive stable instance_id from api_base=#{api_base.inspect}"
-          end
-
-          def discover_live_offerings(filters, provider_health, live:)
-            Array(list_models(live:, **filters)).filter_map do |model|
-              next unless model_matches_filters?(model, filters)
-              next unless model_allowed?(model.id)
-
-              log_model_discovered(model)
-              offering_from_model(model, health: provider_health)
-            end
-          end
-
-          def log_model_discovered(model)
-            log.debug(
-              "[#{slug}] instance=#{provider_instance_id} action=model_discovered " \
-              "model=#{model.id} family=#{model.family}"
-            )
-          end
-
-          def log_discover_complete(offerings)
-            log.info(
-              "[#{slug}] instance=#{provider_instance_id} action=discover_complete " \
-              "model_count=#{Array(offerings).size}"
-            )
-          end
-
-          CONTEXT_WINDOWS = {
-            'qwen3' => 128_000,
-            'qwen2.5' => 128_000,
-            'llama3' => 128_000,
-            'llama3.1' => 128_000,
-            'llama3.2' => 128_000,
-            'llama3.3' => 128_000,
-            'gemma2' => 8_192,
-            'gemma3' => 128_000,
-            'mistral' => 128_000,
-            'deepseek' => 128_000,
-            'phi3' => 128_000,
-            'phi4' => 16_384,
-            'command-r' => 128_000,
-            'codellama' => 16_384,
-            'nomic-embed' => 8_192,
-            'mxbai-embed' => 512,
-            'snowflake' => 512,
-            'bge' => 512
-          }.freeze
-
-          def resolve_models(live)
-            if live
-              @cached_models = list_models
-            else
-              Array(@cached_models)
-            end
-          end
-
-          def running_model_ids
-            Array(list_running_models).filter_map do |m|
-              m['name'] || m[:name] || m['model'] || m[:model]
-            end.map(&:to_s)
-          end
-
-          def offering_from_model(model_info, health: {})
-            loaded = begin
-              running_model_ids.include?(model_info.id.to_s)
-            rescue StandardError
-              health.is_a?(Hash) ? health.fetch(:loaded, false) : false
-            end
-            policy = resolve_capability_policy(model_info)
-            embedding_model = model_info.embedding?
-            capabilities = embedding_model ? [:embedding] : policy[:capabilities]
-            capability_sources = if embedding_model
-                                   policy[:sources].merge(embedding: { value: true, source: :model_metadata })
-                                 else
-                                   policy[:sources]
-                                 end
-            Legion::Extensions::Llm::Routing::ModelOffering.new(
-              provider_family: :ollama,
-              instance_id: required_instance_id,
-              transport: offering_transport,
-              tier: offering_tier,
-              model: model_info.id,
-              usage_type: offering_usage_type(model_info),
-              capabilities: capabilities,
-              capability_sources: capability_sources,
-              limits: offering_limits(model_info),
-              metadata: offering_metadata(model_info).merge(loaded: loaded)
-            )
-          end
-
-          def resolve_capability_policy(model_info)
-            model_id = model_info.id.to_s
-            Legion::Extensions::Llm::CapabilityPolicy.resolve(
-              real: capabilities_from_api(model_info),
-              provider_catalog: {},
-              probe: {},
-              provider_envelope: { streaming: true },
-              provider_config: provider_capability_config,
-              instance_config: instance_capability_config,
-              model_config: model_capability_config(model_id)
-            )
-          end
-
-          def capabilities_from_api(model_info)
-            Array(model_info.capabilities).each_with_object({}) do |cap, hash|
-              sym = cap.to_s.downcase.to_sym
-              hash[sym] = true
-            end
-          end
-
-          def offering_usage_type(model_info)
-            model_info.embedding? ? :embedding : :inference
-          end
-
-          def offering_limits(model_info)
-            ctx = model_info.context_length || resolve_context_window(model_info.id)
-            ctx ? { context_window: ctx } : {}
-          end
-
-          def resolve_context_window(model_id)
-            detail = model_detail(model_id)
-            return detail[:context_window] if detail.is_a?(Hash) && detail[:context_window]
-
-            infer_context_window(model_id)
-          end
-
-          def infer_context_window(model_id)
-            name = model_id.to_s.split(':').first
-            CONTEXT_WINDOWS.find { |prefix, _| name.start_with?(prefix) }&.last
-          end
-
           def extract_context_window(raw)
             return nil unless raw.is_a?(Hash)
 
@@ -297,20 +140,16 @@ module Legion
             match[1].to_i if match
           end
 
-          def offering_metadata(model_info)
-            {
-              context_length: model_info.context_length,
-              family: model_info.family,
-              size_bytes: model_info.size_bytes
-            }.compact
-          end
-
           def ollama_keep_alive
             settings[:keep_alive]
           end
 
-          def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:)
-            enforce_render_messages!(messages)
+          # One request-render boundary (08 R1): renders the Ollama /api/chat
+          # wire FROM canonical values. The base funnel enforces canonical
+          # messages centrally before this runs (08 F2); the provider-spelled
+          # options keys (num_predict, ...) are the translator's edge mapping
+          # (03 O03a, R4).
+          def render_payload(messages, tools:, model:, stream:, schema:, thinking:, params:, tool_prefs:)
             model_id = model.respond_to?(:id) ? model.id : model
             log.debug do
               "ollama provider rendering chat payload model=#{model_id} message_count=#{messages.size} " \
@@ -321,127 +160,131 @@ module Legion
               model: model_id,
               messages: format_messages(messages),
               stream: stream,
-              think: thinking == true,
+              think: think_enabled?(thinking),
               keep_alive: ollama_keep_alive,
               format: schema_format(schema),
-              options: { temperature: temperature }.compact,
+              options: translator.options_for(params),
               tools: format_tools(tools),
               tool_choice: tool_choice(tool_prefs)
             }.compact
           end
 
-          def stream_response(connection, payload, additional_headers = {}, &block)
-            buffer = +''
-            chunks = []
-
-            connection.post(stream_url, payload) do |req|
-              req.headers = additional_headers.merge(req.headers) unless additional_headers.empty?
-              req.options.on_data = ndjson_handler(buffer, chunks, block)
-            end
-
-            finalize_stream(chunks)
+          # Ollama think flag: true only for an enabled Thinking::Config;
+          # absent thinking is an explicit false, never a default-on.
+          def think_enabled?(thinking)
+            thinking ? thinking.enabled? : false
           end
 
-          def ndjson_handler(buffer, chunks, block)
+          # NDJSON streaming (Ollama is not SSE): the one streaming contract —
+          # yield Canonical::Chunk to the block, end in exactly one done chunk
+          # (or an error chunk before the raise), return the accumulated
+          # Canonical::Response (05 O5, 08 R2). Chunk assembly is the shared
+          # StreamAccumulator (10 U1), not a per-gem join.
+          def stream_response(connection, payload, additional_headers = {}, model: nil, &block)
+            accumulator = StreamAccumulator.new
+            buffer = +''
+
+            begin
+              connection.post(stream_url, payload) do |req|
+                req.headers = additional_headers.merge(req.headers) unless additional_headers.empty?
+                req.options.on_data = ndjson_handler(buffer, accumulator, block)
+              end
+            rescue StandardError => e
+              block&.call(Canonical::Chunk.error_chunk(error: e, request_id: nil))
+              raise
+            end
+
+            accumulator.flush_pending_chunk.each { |chunk| block&.call(chunk) }
+
+            response = accumulator.to_response(model:)
+            log.debug { "ollama stream completed text_length=#{response.text.to_s.length}" }
+            done = Canonical::Chunk.done(request_id: nil, usage: response.usage, stop_reason: response.stop_reason)
+            block&.call(done)
+            response
+          end
+
+          def ndjson_handler(buffer, accumulator, block)
             proc do |chunk_data, _bytes, env|
-              next if env.respond_to?(:status) && env.status && env.status != 200
+              status = env.respond_to?(:status) ? env.status : nil
+              next if status.nil?
+
+              if status != 200
+                # Non-200 streaming bodies are the ONE error path: the shared
+                # streaming failure handler raises the typed error (10 U8) —
+                # a non-200 line is never silently skipped.
+                handle_failed_response(chunk_data.to_s, buffer, env)
+                next
+              end
 
               buffer << chunk_data.to_s
-              drain_ndjson_buffer(buffer, chunks, block)
+              drain_ndjson_buffer(buffer, accumulator, block)
             end
           end
 
-          def drain_ndjson_buffer(buffer, chunks, block)
+          def drain_ndjson_buffer(buffer, accumulator, block)
             while (idx = buffer.index("\n"))
               line = buffer.slice!(0..idx).strip
               next if line.empty?
 
-              parse_ndjson_line(line, chunks, block)
+              emit_ndjson_line(line, accumulator, block)
             end
           end
 
-          def parse_ndjson_line(line, chunks, block)
+          def emit_ndjson_line(line, accumulator, block)
             parsed = Legion::JSON.parse(line, symbolize_names: false)
             return unless parsed.is_a?(Hash)
 
-            built = build_chunk(parsed)
-            chunks << built
-            block&.call(built)
+            emit_parsed_chunk(parsed, accumulator, block)
           rescue Legion::JSON::ParseError => e
             handle_exception(e, level: :warn, handled: true, operation: 'ollama.stream_parse')
           end
 
-          def finalize_stream(chunks)
-            return Legion::Extensions::Llm::Message.new(role: :assistant, content: nil) if chunks.empty?
+          def emit_parsed_chunk(data, accumulator, block)
+            result = build_chunk(data)
+            return unless result
 
-            Legion::Extensions::Llm::Message.new(
-              role: :assistant,
-              content: join_stream_content(chunks),
-              thinking: join_stream_thinking(chunks),
-              tool_calls: merge_stream_tool_calls(chunks),
-              model_id: chunks.last.model_id,
-              input_tokens: chunks.last.input_tokens,
-              output_tokens: chunks.last.output_tokens,
-              raw: chunks.last.raw
-            )
-          end
-
-          def join_stream_content(chunks)
-            text = chunks.filter_map { |c| c.content&.to_s }.join
-            text.empty? ? nil : text
-          end
-
-          def join_stream_thinking(chunks)
-            parts = chunks.filter_map { |c| c.thinking&.text }
-            Thinking.build(text: parts.empty? ? nil : parts.join)
-          end
-
-          def merge_stream_tool_calls(chunks)
-            merged = chunks.filter_map(&:tool_calls).reject(&:empty?).reduce({}, :merge)
-            merged.empty? ? nil : merged
-          end
-
-          # Canonical boundary (N x N law): pipeline dispatch delivers
-          # Canonical::Message objects; the provider-native Chat facade
-          # delivers lex-llm Message. Both are object shapes this spoke
-          # renders to the Ollama wire. Plain Hashes are the bypass class
-          # (the 2026-08-19 incident, masked by lenient re-canonicalization)
-          # — reject loudly, never silently re-canonicalize.
-          def enforce_render_messages!(messages)
-            messages.each do |message|
-              next if message.is_a?(Canonical::Message)
-              next if message.is_a?(Legion::Extensions::Llm::Message)
-
-              raise ArgumentError,
-                    "ollama provider input must be Canonical::Message objects, got #{message.class} — " \
-                    'non-canonical message shapes must not cross the dispatch boundary'
+            Array(result).each do |chunk|
+              accumulator.add(chunk).each { |emitted| block&.call(emitted) }
             end
+          end
+
+          # One chunk-parse boundary (08 R2): an Ollama NDJSON line is parsed
+          # to a Canonical::Chunk by the translator dialect edge; the
+          # accumulator owns assembly, this boundary owns the type.
+          def build_chunk(data)
+            translator.parse_chunk(data)
           end
 
           def format_messages(messages)
             messages.map do |message|
               content = message.content
               payload = { role: message.role.to_s, content: format_content(content) }
-              payload[:images] = encoded_attachments(content) if content.respond_to?(:attachments)
-              tool_result = if message.respond_to?(:tool_result?)
-                              message.tool_result?
-                            else
-                              message.role.to_sym == :tool
-                            end
-              payload[:tool_call_id] = message.tool_call_id if tool_result && message.respond_to?(:tool_call_id)
+              images = image_payloads(content)
+              payload[:images] = images unless images.empty?
+              payload[:tool_call_id] = message.tool_call_id if message.role.to_sym == :tool && message.tool_call_id
               payload
             end
           end
 
+          # Canonical content only (08 R2): String | ContentBlock |
+          # Array<ContentBlock> | nil — one render code path. Non-text blocks
+          # (image) ride in the images array, never in the content string.
           def format_content(content)
-            return content.format if content.is_a?(Legion::Extensions::Llm::Content::Raw)
-            return content.text.to_s if content.respond_to?(:text)
+            return content.to_s if content.nil? || content.is_a?(::String)
 
-            content.to_s
+            Array(content).filter_map do |block|
+              block.is_a?(Canonical::ContentBlock) && block.text? ? block.text.to_s : nil
+            end.join
           end
 
-          def encoded_attachments(content)
-            content.attachments.map(&:encoded)
+          # Ollama image wire: the base64 payloads of the canonical :image
+          # content blocks (G20a).
+          def image_payloads(content)
+            return [] unless content.is_a?(::Array)
+
+            content.filter_map do |block|
+              block.is_a?(Canonical::ContentBlock) && block.type == :image ? block.data : nil
+            end
           end
 
           def schema_format(schema)
@@ -474,76 +317,10 @@ module Legion
             tool_prefs[:choice] || tool_prefs['choice']
           end
 
+          # One response-parse boundary (08 R2): an Ollama /api/chat body is
+          # parsed to a Canonical::Response by the translator dialect edge.
           def parse_completion_response(response)
-            body = response.body
-            canonical = translator.parse_response(body)
-            to_legacy_message(canonical, body)
-          end
-
-          def build_chunk(data)
-            canonical_chunk = translator.parse_chunk(data)
-            return nil if canonical_chunk.nil?
-
-            to_legacy_chunk(canonical_chunk, data)
-          end
-
-          def to_legacy_message(canonical, raw_body)
-            usage = canonical.usage
-            Legion::Extensions::Llm::Message.new(
-              role: :assistant,
-              content: canonical.text,
-              model_id: canonical.model,
-              thinking: if canonical.thinking
-                          Legion::Extensions::Llm::Thinking.build(
-                            text: canonical.thinking.content, signature: canonical.thinking.signature
-                          )
-                        end,
-              tool_calls: legacy_tool_calls(canonical.tool_calls),
-              input_tokens: usage&.input_tokens,
-              output_tokens: usage&.output_tokens,
-              raw: raw_body
-            )
-          end
-
-          def to_legacy_chunk(canonical_chunk, raw_data)
-            Legion::Extensions::Llm::Chunk.new(
-              role: :assistant,
-              content: canonical_chunk.text_delta? ? canonical_chunk.delta : nil,
-              thinking: if canonical_chunk.thinking_delta?
-                          Legion::Extensions::Llm::Thinking.build(
-                            text: canonical_chunk.delta
-                          )
-                        end,
-              tool_calls: legacy_streaming_tool_calls(canonical_chunk),
-              model_id: raw_data['model'] || raw_data[:model],
-              input_tokens: canonical_chunk.usage&.input_tokens ||
-                             raw_data['prompt_eval_count'] || raw_data[:prompt_eval_count],
-              output_tokens: canonical_chunk.usage&.output_tokens ||
-                              raw_data['eval_count'] || raw_data[:eval_count],
-              raw: raw_data
-            )
-          end
-
-          def legacy_tool_calls(canonical_tool_calls)
-            return nil if canonical_tool_calls.nil? || canonical_tool_calls.empty?
-
-            canonical_tool_calls.to_h do |tc|
-              [
-                (tc.name || tc.id).to_s.to_sym,
-                Legion::Extensions::Llm::ToolCall.new(id: tc.id, name: tc.name, arguments: tc.arguments || {})
-              ]
-            end
-          end
-
-          def legacy_streaming_tool_calls(canonical_chunk)
-            return nil unless canonical_chunk.tool_call_delta?
-
-            tc = canonical_chunk.tool_call
-            return nil unless tc
-
-            { (tc.name || tc.id).to_s.to_sym => Legion::Extensions::Llm::ToolCall.new(
-              id: tc.id, name: tc.name, arguments: tc.arguments || ''
-            ) }
+            translator.parse_response(response.body)
           end
 
           def parse_list_models_response(response, provider, _capabilities)
@@ -606,6 +383,8 @@ module Legion
             { model: model_id, input: text, dimensions: dimensions }.compact
           end
 
+          # 05 §3 documented artifact: { text:, model:, embedding:
+          # Array<Float>, usage: Canonical::Usage }.
           def parse_embedding_response(response, model:, text:)
             body = response.body
             vectors = if body.key?('embedding')
@@ -618,9 +397,15 @@ module Legion
 
             vector_count = vectors.respond_to?(:size) ? vectors.size : 0
             log.debug { "ollama provider parsed embedding response model=#{model} vector_count=#{vector_count}" }
+            prompt_eval_count = body['prompt_eval_count']
+            usage = prompt_eval_count ? Canonical::Usage.build(input_tokens: prompt_eval_count) : nil
 
-            Legion::Extensions::Llm::Embedding.new(vectors: vectors, model: model,
-                                                   input_tokens: body['prompt_eval_count'].to_i)
+            {
+              text: text,
+              model: model.respond_to?(:id) ? model.id : model,
+              embedding: vectors,
+              usage: usage
+            }.compact
           end
         end
       end

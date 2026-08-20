@@ -143,6 +143,30 @@ module Legion
             }.freeze
           end
 
+          # Canonical Params -> Ollama options wire keys. The ONE G18 mapping
+          # (03 O03a): render_request and the provider's render_payload seam
+          # both run through this — no second key table in the gem.
+          def options_for(params)
+            return {} unless params.is_a?(Canonical::Params)
+
+            options = {}
+            SUPPORTED_PARAMS.each do |param_key|
+              value = params.public_send(param_key)
+              next if value.nil?
+
+              wire_key = PARAM_OPTIONS_KEYS[param_key]
+              options[wire_key] = case param_key
+                                  when :stop_sequences
+                                    Array(value)
+                                  else
+                                    value
+                                  end
+            end
+
+            log_dropped_thinking_params(params)
+            options
+          end
+
           private
 
           attr_reader :config
@@ -263,22 +287,11 @@ module Legion
           def apply_options(payload, params)
             return unless params.is_a?(Canonical::Params)
 
-            options = {}
-            SUPPORTED_PARAMS.each do |param_key|
-              value = params.public_send(param_key)
-              next if value.nil?
-
-              wire_key = PARAM_OPTIONS_KEYS[param_key]
-              options[wire_key] = case param_key
-                                  when :stop_sequences
-                                    Array(value)
-                                  else
-                                    value
-                                  end
-            end
-
+            options = options_for(params)
             payload[:options] = options unless options.empty?
+          end
 
+          def log_dropped_thinking_params(params)
             return unless params.max_thinking_tokens
 
             log.debug do
@@ -348,16 +361,13 @@ module Legion
           def build_canonical_thinking(extraction)
             return nil unless extraction.thinking || extraction.signature
 
-            Canonical::Thinking.new(
-              content: extraction.thinking,
-              signature: extraction.signature
-            )
+            Canonical::Thinking.build(content: extraction.thinking, signature: extraction.signature)
           end
 
           def parse_tool_calls(tool_calls_raw)
             return [] unless tool_calls_raw.is_a?(Array) && !tool_calls_raw.empty?
 
-            tool_calls_raw.filter_map do |call|
+            tool_calls_raw.map do |call|
               call = call.transform_keys(&:to_sym) if call.is_a?(Hash)
               function = call[:function] || call['function'] || {}
               function = function.transform_keys(&:to_sym) if function.is_a?(Hash)
@@ -372,19 +382,16 @@ module Legion
                 arguments: args,
                 source: :client
               )
-            rescue StandardError => e
-              handle_exception(e, level: :warn, handled: true, operation: 'ollama.translator.parse_tool_call')
-              nil
             end
           end
 
+          # Tool arguments (10 U2): a structured wire object passes through as
+          # the canonical Hash; a JSON String goes through the ONE shared
+          # strict parser — invalid JSON raises, never a fabricated {}.
           def parse_tool_arguments(arguments)
-            return {} if arguments.nil? || arguments == ''
-            return arguments if arguments.is_a?(Hash)
+            return arguments if arguments.is_a?(::Hash)
 
-            Legion::JSON.load(arguments)
-          rescue Legion::JSON::ParseError
-            {}
+            Responses::ToolArguments.parse!(arguments)
           end
 
           def map_stop_reason(done_reason, done = nil)
@@ -470,21 +477,28 @@ module Legion
             )
           end
 
+          # Streaming tool-call fragment (the chunk fragment law): the delta
+          # carries { id:, name:, arguments: <String>, index: } — the
+          # StreamAccumulator correlates by wire id (recency fallback) and the
+          # ONE strict arguments parser runs on the assembled string (10 U2).
+          # Ollama re-sends the id with each growing chunk, so the accumulator
+          # replaces state per id — the final fragment is the complete call.
           def build_tool_call_chunk(tool_calls, request_id, stop_reason: nil, usage: nil)
             first_call = tool_calls.first
             first_call = first_call.transform_keys(&:to_sym) if first_call.is_a?(Hash)
             function = first_call[:function] || first_call['function'] || {}
             function = function.transform_keys(&:to_sym) if function.is_a?(Hash)
 
-            tc = Canonical::ToolCall.build(
-              id: (first_call[:id] || first_call['id'] || function[:name] || 'synthesized').to_s,
-              name: (function[:name] || function['name']).to_s,
-              arguments: parse_tool_arguments(function[:arguments] || function['arguments']),
-              source: :client
-            )
+            arguments = function[:arguments] || function['arguments']
+            arguments = Legion::JSON.generate(arguments) if arguments.is_a?(::Hash)
 
             Canonical::Chunk.tool_call_delta(
-              tool_call: tc,
+              tool_call: {
+                id: first_call[:id] || first_call['id'],
+                name: function[:name] || function['name'],
+                arguments: arguments.to_s,
+                index: first_call[:index] || first_call['index']
+              },
               request_id: request_id,
               stop_reason: stop_reason,
               usage: usage
