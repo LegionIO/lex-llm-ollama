@@ -50,14 +50,21 @@ require 'legion/extensions/llm/ollama'
 # lex-llm's own self-test specs, which must not run inside a provider gem's
 # suite.
 if Gem.loaded_specs['lex-llm']
-  # conformance.rb is the Canonical::Conformance fixture module (it also
-  # loads the canonical-type and translator example groups); ssot_provider_*
-  # is the shared SSOT v3 adapter group; ssot_contract_examples.rb carries
-  # the B/F/R boundary groups (B1/B2 run in this suite against the real
-  # callable boundary). Only the example-group files this suite consumes —
-  # the kit directory also contains lex-llm's own self-test specs, which
-  # must not run inside a provider gem's suite.
-  %w[conformance.rb ssot_provider_examples.rb ssot_contract_examples.rb].each do |kit_file|
+  # The kit loads by EXPLICIT file list (kit contract, 09 §5 — the documented
+  # **/*.rb glob loads lex-llm's own self-test specs, which LoadError outside
+  # the repo). conformance.rb is the Canonical::Conformance fixture module;
+  # the *_examples.rb files are the shared example groups; ssot_contract_*
+  # carries the B/F/R boundary groups (B1/B2 run in this suite against the
+  # real callable boundary).
+  %w[
+    conformance.rb
+    canonical_type_examples.rb
+    client_translator_examples.rb
+    provider_translator_examples.rb
+    provider_tool_rendering_examples.rb
+    ssot_contract_examples.rb
+    ssot_provider_examples.rb
+  ].each do |kit_file|
     path = File.join(Gem.loaded_specs['lex-llm'].full_gem_path,
                      'spec/legion/extensions/llm/conformance', kit_file)
     require path if File.exist?(path)

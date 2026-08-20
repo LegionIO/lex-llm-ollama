@@ -865,6 +865,23 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     # count_tokens ignores it — so the fleet's RAW STRING model must pass
     # through UNWRAPPED on every op. Wrapping it in Model::Info would
     # serialize a Data object into the wire payload or the response object.
+    # WorkerExecution spreads the flat wire params into the callable
+    # (**params.except(:messages)) — temperature/max_tokens are
+    # Canonical::Params members (05 O4), never kwargs. The boundary must fold
+    # them via Canonical::Params.from_hash or the 0.8.0 funnel ArgumentErrors
+    # on every fleet chat.
+    it 'folds flat fleet wire params into Canonical::Params at the boundary (05 O4)' do
+      provider = RecordingOllamaProvider.new
+      wrapped(provider).chat([], model: 'qwen3:8b', temperature: 0.3, max_tokens: 2048)
+
+      call = provider.calls.first
+      expect(call[:params]).to be_a(Legion::Extensions::Llm::Canonical::Params)
+      expect(call[:params].temperature).to eq(0.3)
+      expect(call[:params].max_tokens).to eq(2048)
+      expect(call).not_to have_key(:temperature)
+      expect(call).not_to have_key(:max_tokens)
+    end
+
     it 'passes the fleet raw-string model through unwrapped on every op (D15 per-op)' do
       provider = RecordingOllamaProvider.new
       wrapped(provider).chat([], model: 'qwen3:8b')
