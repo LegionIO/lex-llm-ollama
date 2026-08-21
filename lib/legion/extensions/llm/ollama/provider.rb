@@ -12,18 +12,12 @@ module Legion
           include Legion::Logging::Helper
 
           class << self
-            attr_writer :registry_publisher
-
             def slug = 'ollama'
             def local? = true
             def default_transport = :http
             def default_tier = :local
             def configuration_requirements = []
             def capabilities = Capabilities
-
-            def registry_publisher
-              @registry_publisher ||= Ollama.registry_publisher
-            end
           end
 
           # Capability predicates for Ollama model offerings.

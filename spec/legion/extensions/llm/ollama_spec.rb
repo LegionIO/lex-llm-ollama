@@ -5,7 +5,6 @@ require 'spec_helper'
 RSpec.describe Legion::Extensions::Llm::Ollama do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
   let(:qwen_model) { Legion::Extensions::Llm::Model::Info.new(id: 'qwen3.6:27b', provider: :ollama) }
-  let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
   let(:registry) { Legion::Extensions::Llm::Inventory::Registry }
 
   it 'exposes provider defaults with the full settings schema' do
@@ -18,13 +17,6 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(instance).to include(fleet: hash_including(respond_to_requests: false))
     expect(instance[:usage]).to include(inference: true)
     expect(instance[:usage]).not_to have_key(:embedding)
-  end
-
-  it 'provides a registry_publisher backed by the shared base class' do
-    publisher = described_class.registry_publisher
-
-    expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
-    expect(publisher.provider_family).to eq(:ollama)
   end
 
   it 'uses the Legion logging helper on extension and provider surfaces' do
@@ -86,22 +78,6 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     models = parse_models('models' => [{ 'name' => 'qwen-tools', 'capabilities' => %w[completion tools] }])
 
     expect(models.first.capabilities).to include(:completion, :streaming, :tools)
-  end
-
-  it 'does not publish readiness through the legacy registry publisher (SSOT v3: publication is actor-owned)' do
-    stub_registry_publisher
-
-    provider.readiness(live: true)
-
-    expect(registry_publisher).not_to have_received(:publish_readiness_async)
-  end
-
-  it 'does not publish models through the legacy registry publisher (SSOT v3: publication is actor-owned)' do
-    stub_registry_publisher
-
-    provider.discover_offerings(live: true)
-
-    expect(registry_publisher).not_to have_received(:publish_models_async)
   end
 
   it 'does not probe Ollama for uncached non-live offerings reads' do
@@ -171,15 +147,6 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  it 'builds sanitized lex-llm registry events for Ollama model availability' do
-    events = capture_registry_events([nomic_embed_model], readiness: { ready: true })
-
-    expect(events.first.to_h).to include(event_type: :offering_available)
-    expect(events.first.to_h.dig(:offering, :provider_family)).to eq(:ollama)
-    expect(events.first.to_h.dig(:offering, :usage_type)).to eq(:embedding)
-    expect(events.first.to_h.dig(:offering, :model)).to eq('nomic-embed-text:latest')
-  end
-
   describe '.discover_instances' do
     before do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting).and_return(nil)
@@ -223,33 +190,5 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
   def parse_models(body)
     provider.send(:parse_list_models_response, fake_response(body), :ollama, nil)
-  end
-
-  def nomic_embed_model
-    Legion::Extensions::Llm::Model::Info.new(
-      id: 'nomic-embed-text:latest',
-      name: 'nomic-embed-text:latest',
-      provider: :ollama,
-      family: 'nomic-bert',
-      capabilities: [:embedding],
-      modalities_output: [:embeddings],
-      metadata: { 'details' => { 'family' => 'nomic-bert', 'parameter_size' => '137M' } }
-    )
-  end
-
-  def stub_registry_publisher
-    allow(described_class::Provider).to receive(:registry_publisher).and_return(registry_publisher)
-    allow(registry_publisher).to receive(:publish_readiness_async)
-    allow(registry_publisher).to receive(:publish_models_async)
-  end
-
-  def capture_registry_events(models, readiness:)
-    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :ollama)
-    events = []
-    allow(publisher).to receive(:publishing_available?).and_return(true)
-    allow(publisher).to receive(:publish_event) { |event| events << event }
-    allow(publisher).to receive(:schedule).and_yield
-    publisher.publish_models_async(models, readiness:)
-    events
   end
 end

@@ -40,10 +40,6 @@ module Legion
           Provider
         end
 
-        def self.registry_publisher
-          @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(provider_family: PROVIDER_FAMILY)
-        end
-
         # Single source of truth for Ollama instance discovery. The SSOT
         # discovery actor and the fleet responder both read this: only
         # operator-configured instances, no port-scanning, no fabricated
