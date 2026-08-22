@@ -2,7 +2,7 @@
 
 require 'spec_helper'
 
-RSpec.describe Legion::Extensions::Llm::Ollama::Actor::OllamaCallable do
+RSpec.describe Legion::Extensions::Llm::Ollama::Helpers::Callable do
   it 'renders Task-01 folded system content as the leading Ollama system message' do
     captured = []
     connection = Object.new

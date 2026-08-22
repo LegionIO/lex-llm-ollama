@@ -5,7 +5,8 @@ require 'legion/extensions/llm/ollama/provider'
 require 'legion/extensions/llm/ollama/translator'
 require 'legion/extensions/llm/ollama/version'
 require 'legion/logging/helper'
-require 'legion/extensions/llm/ollama/actors/discovery_refresh'
+require 'legion/extensions/llm/ollama/helpers/callable'
+require 'legion/extensions/llm/ollama/actors/discovery'
 
 module Legion
   module Extensions

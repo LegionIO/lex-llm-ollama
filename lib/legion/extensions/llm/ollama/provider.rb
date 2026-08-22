@@ -22,8 +22,8 @@ module Legion
 
           # Capability predicates for Ollama model offerings.
           # vision?, functions?, and embedding? are not authoritative for every
-          # Ollama model; evidence is derived per-model by the DiscoveryRefresh
-          # actor via /api/tags and /api/show. Unknown returns false here.
+          # Ollama model; evidence is derived per-model by the discovery
+          # runner via /api/tags and /api/show. Unknown returns false here.
           module Capabilities
             module_function
 
@@ -70,13 +70,6 @@ module Legion
           def readiness(live: false)
             log.debug { "ollama provider checking readiness live=#{live} endpoint=#{api_base}" }
             super
-          end
-
-          def list_models(live: false, **filters)
-            log.debug { "ollama provider discovering models endpoint=#{api_base}#{models_url}" }
-            super.tap do |models|
-              log.debug { "ollama provider discovered model_count=#{models.size}" }
-            end
           end
 
           def show_model(model)
@@ -317,35 +310,6 @@ module Legion
             translator.parse_response(response.body)
           end
 
-          def parse_list_models_response(response, provider, _capabilities)
-            response.body.fetch('models', []).map do |model|
-              family = model.dig('details', 'family')
-              caps = infer_capabilities(model.fetch('name'), family, Array(model['capabilities']))
-              output_mods = embedding_model?(model.fetch('name'), family) ? [:embeddings] : [:text]
-
-              Legion::Extensions::Llm::Model::Info.new(
-                id: model.fetch('name'),
-                name: model.fetch('name'),
-                provider: provider,
-                family: family,
-                capabilities: caps,
-                modalities_output: output_mods,
-                metadata: model.merge('created_at' => model['modified_at'])
-              )
-            end
-          end
-
-          def infer_capabilities(name, family, api_caps)
-            normalized = normalize_ollama_capabilities(api_caps)
-            return normalized unless normalized.empty?
-
-            if embedding_model?(name, family)
-              [:embedding]
-            else
-              %i[completion streaming vision]
-            end
-          end
-
           def normalize_ollama_capabilities(capabilities)
             Array(capabilities).compact.each_with_object([]) do |capability, result|
               capability_sym = capability.to_s.downcase.strip.to_sym
@@ -363,10 +327,6 @@ module Legion
             caps = raw['capabilities'] || raw[:capabilities]
             normalized = normalize_ollama_capabilities(caps)
             normalized unless normalized.empty?
-          end
-
-          def embedding_model?(name, family)
-            name.to_s.match?(/embed|embedding/i) || family.to_s.match?(/bert|nomic/i)
           end
 
           def render_embedding_payload(text, model:, dimensions:)

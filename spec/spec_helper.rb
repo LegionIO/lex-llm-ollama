@@ -34,9 +34,22 @@ module Legion
       # `settings` runs the actual 1.4.2 resolution: the actor's
       # Legion::Extensions::Llm::Ollama::Actor::* namespace resolves to the
       # nested [:extensions][:llm][:ollama] node — the same live tree the
-      # discovery path reads via CredentialSources.setting.
+      # discovery path reads via CredentialSources.setting. The shared
+      # Discovery::Pipeline (mixed into the runner module) and the base actor
+      # call `log` and `handle_exception` on the includer, so the stand-in
+      # provides both: the real Logging::Helper for `log`, and a logging-only
+      # `handle_exception` that never re-raises (callers own `handled:`
+      # semantics and re-raise explicitly — the pipeline re-raises programming
+      # errors and CatalogFetchFailure after logging).
       module Lex
         include Legion::Settings::Helper
+        include Legion::Logging::Helper
+
+        def handle_exception(exception, level: :error, handled: true, **)
+          log.public_send(level) do
+            "[spec stand-in] exception=#{exception.class} handled=#{handled} message=#{exception.message}"
+          end
+        end
       end
     end
   end

@@ -20,7 +20,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama::Provider do
     canonical_methods.each { |method_name| expect_keyword_compatible(method_name) }
   end
 
-  def canonical_methods = %i[embed image list_models discover_offerings health count_tokens]
+  def canonical_methods = %i[embed image discover_offerings health count_tokens]
 
   def expect_keyword_compatible(method_name)
     return unless described_class.method_defined?(method_name)

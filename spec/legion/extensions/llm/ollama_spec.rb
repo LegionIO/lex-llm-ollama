@@ -1,10 +1,12 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'legion/extensions/llm/ollama/runners/discovery'
 
 RSpec.describe Legion::Extensions::Llm::Ollama do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
-  let(:qwen_model) { Legion::Extensions::Llm::Model::Info.new(id: 'qwen3.6:27b', provider: :ollama) }
+  # The render funnel takes a RAW STRING model (0.8.0 model type deleted).
+  let(:qwen_model) { 'qwen3.6:27b' }
   let(:registry) { Legion::Extensions::Llm::Inventory::Registry }
 
   it 'exposes provider defaults with the full settings schema' do
@@ -61,30 +63,18 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
   end
 
   it 'renders embedding payloads with model ids' do
-    embed_model = Legion::Extensions::Llm::Model::Info.new(id: 'nomic-embed-text:latest', provider: :ollama)
-    payload = provider.send(:render_embedding_payload, 'hello', model: embed_model, dimensions: nil)
+    payload = provider.send(:render_embedding_payload, 'hello', model: 'nomic-embed-text:latest', dimensions: nil)
 
     expect(payload).to eq(model: 'nomic-embed-text:latest', input: 'hello')
   end
 
-  it 'does not assume GGUF chat models support tools without Ollama capability metadata' do
-    models = parse_models('models' => [{ 'name' => 'hf.co/unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL' }])
-
-    expect(models.first.capabilities).to include(:completion, :streaming)
-    expect(models.first.capabilities).not_to include(:tools)
-  end
-
-  it 'advertises tools only when Ollama reports tools capability metadata' do
-    models = parse_models('models' => [{ 'name' => 'qwen-tools', 'capabilities' => %w[completion tools] }])
-
-    expect(models.first.capabilities).to include(:completion, :streaming, :tools)
-  end
-
   it 'does not probe Ollama for uncached non-live offerings reads' do
-    allow(provider).to receive(:list_models).and_raise('unexpected live discovery')
-
+    # The read path serves the Registry snapshot only — with no activated
+    # instance there is nothing to serve and no live probe.
+    registry.reset!
     expect(provider.discover_offerings).to eq([])
-    expect(provider).not_to have_received(:list_models)
+  ensure
+    registry.reset!
   end
 
   # 07 C5: the provider read path serves the activated inventory offerings
@@ -98,17 +88,16 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
         provider_family: :ollama, instance_id: 'default'
       )
-      actor = Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh.allocate
-      allow(actor).to receive(:fetch_model_detail_safe).and_return(nil)
-      draft = actor.send(
-        :build_offering_draft,
-        model_name: 'qwen3.6:27b',
+      runner = Legion::Extensions::Llm::Ollama::Runners::Discovery
+      allow(runner).to receive(:fetch_model_detail_safe).and_return(nil)
+      draft = runner.build_offering_draft(
+        model_id: 'qwen3.6:27b',
         model_data: { name: 'qwen3.6:27b', digest: 'sha256:specdigest' },
         instance_cfg: { base_url: 'http://127.0.0.1:11435', tier: tier },
         instance_key: key
       )
 
-      callable = Legion::Extensions::Llm::Ollama::Actor::OllamaCallable.new(
+      callable = Legion::Extensions::Llm::Ollama::Helpers::Callable.new(
         instance_cfg: { base_url: 'http://127.0.0.1:11435' }, logger: Logger.new(File::NULL)
       )
       coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
@@ -186,9 +175,5 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
   def fake_response(body)
     Struct.new(:body).new(body)
-  end
-
-  def parse_models(body)
-    provider.send(:parse_list_models_response, fake_response(body), :ollama, nil)
   end
 end

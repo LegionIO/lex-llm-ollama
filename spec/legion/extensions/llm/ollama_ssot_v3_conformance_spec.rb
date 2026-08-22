@@ -15,13 +15,17 @@ require 'legion/extensions/llm/taxonomies'
 require 'legion/extensions/llm/capabilities'
 require 'legion/extensions/llm/fleet/worker_execution'
 require 'legion/extensions/llm/fleet/protocol'
+require 'legion/extensions/llm/ollama/runners/discovery'
 
-# OllamaCallable is loaded via spec_helper → ollama.rb → discovery_refresh.rb
-# (spec_helper stubs the LegionIO actor runtime before loading ollama)
+# The production callable (Ollama::Helpers::Callable) and the discovery
+# runner (Ollama::Runners::Discovery) load via spec_helper → ollama.rb →
+# actors/discovery.rb + helpers/callable.rb (spec_helper stubs the LegionIO
+# actor runtime before loading ollama)
 
 # ── RecordingOllamaProvider ───────────────────────────────────────────────────
 # Test-local stand-in for the per-instance Ollama::Provider that the
-# PRODUCTION OllamaCallable delegates its fleet dispatch ops to. It replaces
+# PRODUCTION production callable (Ollama::Helpers::Callable) delegates its
+# fleet dispatch ops to. It replaces
 # the I/O boundary (the Provider's HTTP client) so conformance tests run
 # offline; the callable under test is the real production class, and its
 # dispatch methods are the real delegation code.
@@ -36,8 +40,8 @@ class RecordingOllamaProvider
   def call_count = @calls.size
 
   # The production Ollama::Provider inherits enforce_canonical_messages!
-  # from the lex-llm base (0.7.7); the OllamaCallable dispatch ops call it
-  # before delegating. Delegate to the real implementation so the callable's
+  # from the lex-llm base (0.7.7); the production callable's dispatch ops
+  # call it before delegating. Delegate to the real implementation so the callable's
   # dispatch-boundary enforcement runs production code under test.
   def enforce_canonical_messages!(messages)
     base.enforce_canonical_messages!(messages)
@@ -92,8 +96,9 @@ class OllamaExplicitServiceGoneSignal < StandardError; end
 # ── OllamaSsotHarness ─────────────────────────────────────────────────────────
 # Harness class for Ollama SSOT v3 conformance testing. Implements the full
 # interface required by the shared conformance examples without touching any
-# external service. build_callable returns the PRODUCTION OllamaCallable
-# (dispatch ops delegate to an injected RecordingOllamaProvider in place of
+# external service. build_callable returns the PRODUCTION production
+# callable (Ollama::Helpers::Callable; dispatch ops delegate to an injected
+# RecordingOllamaProvider in place of
 # the real per-instance Provider's HTTP client), and identity/draft building
 # delegate to the PRODUCTION methods — the harness duplicates no builder
 # logic (drift would mask production bugs).
@@ -126,37 +131,40 @@ class OllamaSsotHarness
   def instance_configs = INSTANCE_CONFIGS
 
   # Identity is the operator's CONFIG NAME — the production claim path
-  # (DiscoveryRefresh#claim_and_activate_instance) uses name.to_s as
+  # (Pipeline#claim_and_activate_instance) uses name.to_s as
   # InstanceKey.instance_id, the key the router uses for instances.<name>
   # settings lookups.
   def instance_id(instance_config:)
     instance_config.fetch(:name).to_s
   end
 
-  # Delegates to the actor's PRODUCTION physical-id derivation — the
+  # Delegates to the runner's PRODUCTION physical-id derivation — the
   # secondary dedup/diagnostics field, not identity.
   def physical_id(instance_config:)
-    Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh
-      .allocate.send(:derive_physical_id, instance_cfg: instance_config)
+    Legion::Extensions::Llm::Ollama::Runners::Discovery
+      .derive_physical_id(instance_cfg: instance_config)
   end
 
   def build_callable(instance_config:)
     provider = RecordingOllamaProvider.new
-    callable = Legion::Extensions::Llm::Ollama::Actor::OllamaCallable.new(
+    callable = Legion::Extensions::Llm::Ollama::Helpers::Callable.new(
       instance_cfg: instance_config, logger: @logger, provider: provider
     )
     @provider_by_callable[callable] = provider
     callable
   end
 
-  # Delegates to the actor's PRODUCTION draft builder (ModelDiscovery),
-  # not a spec-local duplicate of the evidence construction.
+  # Delegates to the runner's PRODUCTION draft builder, not a spec-local
+  # duplicate of the evidence construction. The InstanceKey is built
+  # directly — the pipeline composes it from the same parts inline.
   def build_offering_drafts(instance_config:, tier: :local, model_name: 'qwen3:8b', model_data: nil, **)
-    actor = Legion::Extensions::Llm::Ollama::Actor::DiscoveryRefresh.allocate
+    runner = Legion::Extensions::Llm::Ollama::Runners::Discovery
     cfg = instance_config.merge(tier: tier)
     instance_id = cfg.fetch(:name).to_s
-    physical_id = actor.send(:derive_physical_id, instance_cfg: cfg)
-    instance_key = actor.send(:build_instance_key, instance_id: instance_id, physical_id: physical_id)
+    instance_key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      provider_family: :ollama, instance_id: instance_id,
+      physical_id: runner.derive_physical_id(instance_cfg: cfg)
+    )
     data = model_data || {
       name: model_name,
       digest: 'sha256:specdigest',
@@ -164,9 +172,8 @@ class OllamaSsotHarness
       size: 4_700_000_000
     }
     [
-      actor.send(
-        :build_offering_draft,
-        model_name: model_name,
+      runner.build_offering_draft(
+        model_id: model_name,
         model_data: data,
         instance_cfg: cfg,
         instance_key: instance_key
@@ -352,15 +359,12 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       config = ssot_harness.instance_configs[0]
       reg = Legion::Extensions::Llm::Inventory::Registry
       first_run = bring_up_instance(config)
-      first_offering_id = reg.snapshot.offerings_for(instance_key: first_run[:key]).first.offering_id
       first_lane_id = reg.snapshot.lanes_for(instance_key: first_run[:key]).first.lane_id
 
       reg.reset!
       second_run = bring_up_instance(config)
-      second_offering_id = reg.snapshot.offerings_for(instance_key: second_run[:key]).first.offering_id
       second_lane_id = reg.snapshot.lanes_for(instance_key: second_run[:key]).first.lane_id
 
-      expect(second_offering_id).to eq(first_offering_id)
       expect(second_lane_id).to eq(first_lane_id)
     end
   end
@@ -393,13 +397,17 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       { publisher: publisher, key: key, callable: callable, token: token }
     end
 
-    it 'preserves offering_id and lane_id when tier changes from local to frontier' do
+    it 'recomposes the lane id deterministically when tier changes from local to frontier' do
+      # Tier is the first part of the 5-tuple lane id: a tier change moves
+      # the lane to a NEW id that is the same tuple with the tier prefix
+      # swapped — identity otherwise unchanged (no offering_id member in
+      # 0.8.0; the lane IS the 5-tuple).
       config = ssot_harness.instance_configs[0]
       context = bring_up_with_tier(config, tier: :local)
       reg = Legion::Extensions::Llm::Inventory::Registry
 
-      before_offering = reg.snapshot.offerings_for(instance_key: context[:key]).first
       before_lane = reg.snapshot.lanes_for(instance_key: context[:key]).first
+      expect(before_lane.lane_id).to start_with('local:ollama:alpha:inference:qwen3:8b')
 
       frontier_drafts = ssot_harness.build_offering_drafts(
         instance_config: config, callable: context[:callable], tier: :frontier
@@ -412,12 +420,11 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
         sequence: 1
       )
 
-      after_offering = reg.snapshot.offerings_for(instance_key: context[:key]).first
       after_lane = reg.snapshot.lanes_for(instance_key: context[:key]).first
-
-      expect(after_offering.offering_id).to eq(before_offering.offering_id)
-      expect(after_lane.lane_id).to eq(before_lane.lane_id)
-      expect(after_offering.tier).to eq(:frontier)
+      expect(after_lane.lane_id).to eq(before_lane.lane_id.sub(/\Alocal:/, 'frontier:'))
+      expect(after_lane.tier).to eq(:frontier)
+      expect(after_lane.model).to eq(before_lane.model)
+      expect(after_lane.instance_id).to eq(before_lane.instance_id)
     end
   end
 
@@ -807,9 +814,9 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     end
   end
 
-  # ─── OllamaCallable contract ────────────────────────────────────────────────
+  # ─── Production callable contract ───────────────────────────────────────────
 
-  describe Legion::Extensions::Llm::Ollama::Actor::OllamaCallable do
+  describe Legion::Extensions::Llm::Ollama::Helpers::Callable do
     let(:callable) do
       described_class.new(
         instance_cfg: ssot_harness.instance_configs[0],
@@ -863,7 +870,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     # (model.respond_to?(:id) ? model.id : model) for chat and embed, embed
     # places the model verbatim in the Embedding response object, and
     # count_tokens ignores it — so the fleet's RAW STRING model must pass
-    # through UNWRAPPED on every op. Wrapping it in Model::Info would
+    # through UNWRAPPED on every op. Wrapping it in a model object would
     # serialize a Data object into the wire payload or the response object.
     # WorkerExecution spreads the flat wire params into the callable
     # (**params.except(:messages)) — temperature/max_tokens are
@@ -894,15 +901,6 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       end
       expect(provider.calls.map { |c| c[:operation] }).to eq(%i[chat stream_chat embed count_tokens])
       expect(provider.calls[2]).to include(text: 'hello', model: 'nomic-embed-text')
-    end
-
-    it 'passes a Model::Info model through unchanged (D15 pass-through)' do
-      provider = RecordingOllamaProvider.new
-      info = Legion::Extensions::Llm::Model::Info.new(id: 'qwen3:8b', provider: :ollama)
-
-      wrapped(provider).chat([], model: info)
-
-      expect(provider.calls.first[:model]).to equal(info)
     end
 
     # D15 PER-OP against the REAL render path: the production Provider's
@@ -1037,7 +1035,8 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
   # ─── 0.8.0 boundary kit groups (09 B1/B2) — the real callable boundary ────
   # B1 (central enforcement) and B2 (canonical outputs, asserted by type) run
-  # against the PRODUCTION OllamaCallable wrapping a real Ollama::Provider —
+  # against the PRODUCTION production callable (Ollama::Helpers::Callable)
+  # wrapping a real Ollama::Provider —
   # the offline fake replaces only the Provider's HTTP connection, so the
   # production render_payload / parse_completion_response / stream_response
   # boundaries all execute (the documented matrix blind spot, closed at the
@@ -1077,7 +1076,7 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
       connection.define_singleton_method(:close) { true }
       provider = Legion::Extensions::Llm::Ollama::Provider.new(base_url: 'http://127.0.0.1:11435')
       provider.instance_variable_set(:@connection, connection)
-      Legion::Extensions::Llm::Ollama::Actor::OllamaCallable.new(
+      Legion::Extensions::Llm::Ollama::Helpers::Callable.new(
         instance_cfg: { base_url: 'http://127.0.0.1:11435' },
         logger: Logger.new(File::NULL),
         provider: provider
@@ -1118,12 +1117,12 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     it 'does not require Legion::LLM in the discovery actor' do
       project_root = File.expand_path('../../../..', __dir__)
       actor_file = File.read(
-        File.join(project_root, 'lib/legion/extensions/llm/ollama/actors/discovery_refresh.rb')
+        File.join(project_root, 'lib/legion/extensions/llm/ollama/actors/discovery.rb')
       )
       expect(actor_file).not_to match(/\bLegion::LLM\b/)
     end
 
-    it 'OllamaCallable does not reference Legion::LLM' do
+    it 'the production callable does not reference Legion::LLM' do
       callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
       outcome = callable.normalize_dispatch_error(error: RuntimeError.new('test'))
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
