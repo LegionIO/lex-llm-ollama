@@ -27,6 +27,9 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'legion-logging', '>= 1.3.2'
   spec.add_dependency 'legion-settings', '>= 1.4.2'
   spec.add_dependency 'legion-transport', '>= 1.4.14'
-  # 0.7.6 adds write-time WeightSchema records and the atomic writer reconciler.
-  spec.add_dependency 'lex-llm', '>= 0.7.6'
+  # 0.8.0 is the contract cut this gem conforms to: canonical-only provider
+  # funnel (central enforce_canonical_messages!), Canonical::Response/Chunk
+  # output, Registry-snapshot discovery read path, fleet protocol v3, and the
+  # legacy Llm::* type rip.
+  spec.add_dependency 'lex-llm', '>= 0.8.0'
 end

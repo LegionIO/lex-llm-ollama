@@ -1,11 +1,13 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'legion/extensions/llm/ollama/runners/discovery'
 
 RSpec.describe Legion::Extensions::Llm::Ollama do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
-  let(:qwen_model) { Legion::Extensions::Llm::Model::Info.new(id: 'qwen3.6:27b', provider: :ollama) }
-  let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
+  # The render funnel takes a RAW STRING model (0.8.0 model type deleted).
+  let(:qwen_model) { 'qwen3.6:27b' }
+  let(:registry) { Legion::Extensions::Llm::Inventory::Registry }
 
   it 'exposes provider defaults with the full settings schema' do
     settings = described_class.default_settings
@@ -17,13 +19,6 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
     expect(instance).to include(fleet: hash_including(respond_to_requests: false))
     expect(instance[:usage]).to include(inference: true)
     expect(instance[:usage]).not_to have_key(:embedding)
-  end
-
-  it 'provides a registry_publisher backed by the shared base class' do
-    publisher = described_class.registry_publisher
-
-    expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
-    expect(publisher.provider_family).to eq(:ollama)
   end
 
   it 'uses the Legion logging helper on extension and provider surfaces' do
@@ -48,117 +43,97 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
 
     expect(payload.values_at(:model, :stream, :think)).to eq(['qwen3.6:27b', false, true])
     expect(payload[:messages]).to eq([{ role: 'user', content: 'hello' }])
-    expect(payload[:options]).to eq({ temperature: 0.2 })
+    expect(payload[:options]).to eq(temperature: 0.2)
   end
 
-  it 'parses current and legacy Ollama embedding responses' do
-    current = embedding_for('embeddings' => [[0.1, 0.2]], 'prompt_eval_count' => 3)
-    legacy = embedding_for('embedding' => [0.3, 0.4])
+  it 'parses current and legacy Ollama embedding responses into the 05 §3 artifact' do
+    # Single text input: the embeddings array's first vector is the result;
+    # Array input keeps the full vector list.
+    current = embedding_for({ 'embeddings' => [[0.1, 0.2]], 'prompt_eval_count' => 3 })
+    legacy = embedding_for({ 'embedding' => [0.3, 0.4] })
+    multi = embedding_for({ 'embeddings' => [[0.1], [0.2]] }, text: %w[one two])
 
-    expect([current.vectors, current.input_tokens, legacy.vectors]).to eq([[0.1, 0.2], 3, [0.3, 0.4]])
+    expect(current[:embedding]).to eq([0.1, 0.2])
+    expect(current[:usage]).to be_a(Legion::Extensions::Llm::Canonical::Usage)
+    expect(current[:usage].input_tokens).to eq(3)
+    expect(legacy[:embedding]).to eq([0.3, 0.4])
+    expect(legacy[:model]).to eq('nomic-embed-text')
+    expect(legacy).not_to have_key(:usage)
+    expect(multi[:embedding]).to eq([[0.1], [0.2]])
   end
 
   it 'renders embedding payloads with model ids' do
-    embed_model = Legion::Extensions::Llm::Model::Info.new(id: 'nomic-embed-text:latest', provider: :ollama)
-    payload = provider.send(:render_embedding_payload, 'hello', model: embed_model, dimensions: nil)
+    payload = provider.send(:render_embedding_payload, 'hello', model: 'nomic-embed-text:latest', dimensions: nil)
 
     expect(payload).to eq(model: 'nomic-embed-text:latest', input: 'hello')
   end
 
-  it 'does not assume GGUF chat models support tools without Ollama capability metadata' do
-    models = parse_models('models' => [{ 'name' => 'hf.co/unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL' }])
-
-    expect(models.first.capabilities).to include(:completion, :streaming)
-    expect(models.first.capabilities).not_to include(:tools)
-  end
-
-  it 'advertises tools only when Ollama reports tools capability metadata' do
-    models = parse_models('models' => [{ 'name' => 'qwen-tools', 'capabilities' => %w[completion tools] }])
-
-    expect(models.first.capabilities).to include(:completion, :streaming, :tools)
-  end
-
-  it 'does not publish readiness through the legacy registry publisher (SSOT v3: publication is actor-owned)' do
-    stub_registry_publisher
-
-    provider.readiness(live: true)
-
-    expect(registry_publisher).not_to have_received(:publish_readiness_async)
-  end
-
-  it 'does not publish models through the legacy registry publisher (SSOT v3: publication is actor-owned)' do
-    stub_registry_publisher
-    stub_model_discovery
-
-    provider.discover_offerings(live: true)
-
-    expect(registry_publisher).not_to have_received(:publish_models_async)
-  end
-
   it 'does not probe Ollama for uncached non-live offerings reads' do
-    allow(provider).to receive(:list_models).and_raise('unexpected live discovery')
-
+    # The read path serves the Registry snapshot only — with no activated
+    # instance there is nothing to serve and no live probe.
+    registry.reset!
     expect(provider.discover_offerings).to eq([])
-    expect(provider).not_to have_received(:list_models)
+  ensure
+    registry.reset!
   end
 
-  it 'serves non-live offerings reads from the live discovery cache' do
-    stub_model_discovery
-    live_offerings = provider.discover_offerings(live: true)
-    allow(provider).to receive(:list_models).and_raise('unexpected live discovery')
+  # 07 C5: the provider read path serves the activated inventory offerings
+  # from Registry.snapshot; the SSOT discovery actor is the sole publication
+  # path (no live provider-side offering construction in 0.8.0).
+  describe 'registry-snapshot offerings read path' do
+    before { registry.reset! }
+    after { registry.reset! }
 
-    expect(provider.discover_offerings.map(&:model)).to eq(live_offerings.map(&:model))
-  end
+    def activate_snapshot_instance(tier: :local)
+      key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+        provider_family: :ollama, instance_id: 'default'
+      )
+      runner = Legion::Extensions::Llm::Ollama::Runners::Discovery
+      allow(runner).to receive(:fetch_model_detail_safe).and_return(nil)
+      draft = runner.build_offering_draft(
+        model_id: 'qwen3.6:27b',
+        model_data: { name: 'qwen3.6:27b', digest: 'sha256:specdigest' },
+        instance_cfg: { base_url: 'http://127.0.0.1:11435', tier: tier },
+        instance_key: key
+      )
 
-  it 'uses provider instance transport and tier in discovered offerings' do
-    configured = described_class::Provider.new(instance_id: :fleet_node, transport: :rabbitmq, tier: :fleet)
-    offering = configured.send(:offering_from_model, qwen_model)
+      callable = Legion::Extensions::Llm::Ollama::Helpers::Callable.new(
+        instance_cfg: { base_url: 'http://127.0.0.1:11435' }, logger: Logger.new(File::NULL)
+      )
+      coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
+        instance_key: key, enqueue: ->(**) { true }
+      )
+      publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :ollama)
+      token = publisher.claim_instance(
+        instance_id: 'default', callable: callable, probe_request_handle: coordinator
+      )
+      probe = publisher.readiness_probe_started(instance_id: 'default', publisher_token: token)
+      publisher.activate_instance_snapshot(
+        instance_id: 'default', publisher_token: token, offerings: [draft], sequence: 0, probe_token: probe
+      )
+    end
 
-    expect(offering.to_h).to include(instance_id: :fleet_node, transport: :rabbitmq, tier: :fleet)
-  end
+    it 'serves the activated offerings for the provider instance' do
+      activate_snapshot_instance
 
-  it 'preserves embedding capability on embedding offerings' do
-    offering = provider.send(:offering_from_model, nomic_embed_model)
+      offerings = provider.discover_offerings
 
-    expect(offering.capabilities).to include(:embedding)
-    expect(offering.capabilities).not_to include(:streaming)
-  end
+      expect(offerings.map(&:model)).to eq(['qwen3.6:27b'])
+      expect(offerings.first.tier).to eq(:local)
+    end
 
-  it 'marks offerings discovery fallback exceptions as handled' do
-    stub_cached_offering_failure
+    it 'honors the draft tier on the served offerings' do
+      activate_snapshot_instance(tier: :frontier)
 
-    offerings = provider.discover_offerings
+      expect(provider.discover_offerings.first.tier).to eq(:frontier)
+    end
 
-    expect(offerings.map(&:model)).to eq(['qwen3.6:27b'])
-  end
+    it 'filters served offerings by model' do
+      activate_snapshot_instance
 
-  it 'annotates offerings with loaded: true for running models' do
-    stub_model_discovery
-    offerings = provider.discover_offerings(live: true)
-
-    expect(offerings.first.metadata[:loaded]).to be(true)
-  end
-
-  it 'annotates offerings with loaded: false for registered but not running models' do
-    allow(provider.connection).to receive(:get).with('/api/tags').and_return(
-      fake_response({ 'models' => [{ 'name' => 'qwen3.6:27b', 'details' => { 'family' => 'qwen35' } }] })
-    )
-    allow(provider.connection).to receive(:get).with('/api/ps').and_return(
-      fake_response({ 'models' => [] })
-    )
-
-    offerings = provider.discover_offerings(live: true)
-
-    expect(offerings.first.metadata[:loaded]).to be(false)
-  end
-
-  it 'builds sanitized lex-llm registry events for Ollama model availability' do
-    events = capture_registry_events([nomic_embed_model], readiness: { ready: true })
-
-    expect(events.first.to_h).to include(event_type: :offering_available)
-    expect(events.first.to_h.dig(:offering, :provider_family)).to eq(:ollama)
-    expect(events.first.to_h.dig(:offering, :usage_type)).to eq(:embedding)
-    expect(events.first.to_h.dig(:offering, :model)).to eq('nomic-embed-text:latest')
+      expect(provider.discover_offerings(model: 'qwen3.6:27b').map(&:model)).to eq(['qwen3.6:27b'])
+      expect(provider.discover_offerings(model: 'llama3.1:8b')).to be_empty
+    end
   end
 
   describe '.discover_instances' do
@@ -187,142 +162,18 @@ RSpec.describe Legion::Extensions::Llm::Ollama do
   end
 
   def chat_payload
-    message = Legion::Extensions::Llm::Message.new(role: :user, content: 'hello')
-    provider.send(:render_payload, [message], tools: {}, temperature: 0.2, model: qwen_model, stream: false,
-                                              schema: nil, thinking: true, tool_prefs: nil)
+    message = Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
+    params = Legion::Extensions::Llm::Canonical::Params.build(temperature: 0.2)
+    thinking = Legion::Extensions::Llm::Canonical::Thinking::Config.build(effort: 'medium')
+    provider.send(:render_payload, [message], tools: {}, params: params, model: qwen_model, stream: false,
+                                              schema: nil, thinking: thinking, tool_prefs: nil)
   end
 
-  def embedding_for(body)
-    provider.send(:parse_embedding_response, fake_response(body), model: 'nomic-embed-text', text: 'hello')
+  def embedding_for(body, text: 'hello')
+    provider.send(:parse_embedding_response, fake_response(body), model: 'nomic-embed-text', text: text)
   end
 
   def fake_response(body)
     Struct.new(:body).new(body)
-  end
-
-  def parse_models(body)
-    provider.send(:parse_list_models_response, fake_response(body), :ollama, nil)
-  end
-
-  def nomic_embed_model
-    Legion::Extensions::Llm::Model::Info.new(
-      id: 'nomic-embed-text:latest',
-      name: 'nomic-embed-text:latest',
-      provider: :ollama,
-      family: 'nomic-bert',
-      capabilities: [:embedding],
-      modalities_output: [:embeddings],
-      metadata: { 'details' => { 'family' => 'nomic-bert', 'parameter_size' => '137M' } }
-    )
-  end
-
-  def stub_model_discovery
-    allow(provider.connection).to receive(:get).with('/api/tags').and_return(
-      fake_response({ 'models' => [{ 'name' => 'qwen3.6:27b', 'details' => { 'family' => 'qwen35' } }] })
-    )
-    allow(provider.connection).to receive(:get).with('/api/ps').and_return(
-      fake_response({ 'models' => [{ 'name' => 'qwen3.6:27b' }] })
-    )
-  end
-
-  def stub_cached_offering_failure
-    stub_model_discovery
-    provider.discover_offerings(live: true)
-    allow(provider).to receive(:offering_from_model).and_raise('broken cached model')
-  end
-
-  def stub_registry_publisher
-    allow(described_class::Provider).to receive(:registry_publisher).and_return(registry_publisher)
-    allow(registry_publisher).to receive(:publish_readiness_async)
-    allow(registry_publisher).to receive(:publish_models_async)
-  end
-
-  def capture_registry_events(models, readiness:)
-    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :ollama)
-    events = []
-    allow(publisher).to receive(:publishing_available?).and_return(true)
-    allow(publisher).to receive(:publish_event) { |event| events << event }
-    allow(publisher).to receive(:schedule).and_yield
-    publisher.publish_models_async(models, readiness:)
-    events
-  end
-
-  describe 'CapabilityPolicy integration' do
-    let(:policy_provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
-
-    before do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :ollama).and_return({})
-    end
-
-    it 'reports API-provided capabilities as :model_metadata source' do
-      model = Legion::Extensions::Llm::Model::Info.new(
-        id: 'qwen3:8b', provider: :ollama,
-        capabilities: %i[completion tools]
-      )
-      offering = policy_provider.send(:offering_from_model, model)
-
-      expect(offering.capabilities).to include(:tools)
-      expect(offering.capability_sources[:tools]).to eq({ value: true, source: :model_metadata })
-    end
-
-    it 'defaults optional capabilities to false when no API capabilities exist' do
-      model = Legion::Extensions::Llm::Model::Info.new(id: 'bare-model:latest', provider: :ollama)
-      offering = policy_provider.send(:offering_from_model, model)
-
-      expect(offering.capability_sources[:tools]).to eq({ value: false, source: :default_false })
-      expect(offering.capability_sources[:thinking]).to eq({ value: false, source: :default_false })
-      expect(offering.capability_sources[:vision]).to eq({ value: false, source: :default_false })
-    end
-
-    it 'applies streaming from provider_envelope for all models' do
-      model = Legion::Extensions::Llm::Model::Info.new(id: 'bare-model:latest', provider: :ollama)
-      offering = policy_provider.send(:offering_from_model, model)
-
-      expect(offering.capabilities).to include(:streaming)
-      expect(offering.capability_sources[:streaming]).to eq({ value: true, source: :provider_envelope })
-    end
-
-    it 'applies provider-level overrides with :provider_override source' do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :ollama).and_return({ streaming_flag: true, tool_flag: false })
-
-      model = Legion::Extensions::Llm::Model::Info.new(
-        id: 'qwen3:8b', provider: :ollama, capabilities: %i[completion tools]
-      )
-      offering = policy_provider.send(:offering_from_model, model)
-
-      expect(offering.capability_sources[:streaming]).to eq({ value: true, source: :provider_override })
-      expect(offering.capability_sources[:tools]).to eq({ value: false, source: :provider_override })
-    end
-
-    it 'applies instance-level overrides with :instance_override source' do
-      configured = described_class::Provider.new(
-        instance_id: :gpu_node, capabilities: { streaming: true, tools: true }
-      )
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :ollama).and_return({})
-
-      model = Legion::Extensions::Llm::Model::Info.new(id: 'llama3:8b', provider: :ollama)
-      offering = configured.send(:offering_from_model, model)
-
-      expect(offering.capability_sources[:streaming]).to eq({ value: true, source: :instance_override })
-      expect(offering.capability_sources[:tools]).to eq({ value: true, source: :instance_override })
-    end
-
-    it 'applies model-level overrides with :model_override source' do
-      configured = described_class::Provider.new(
-        instance_id: :default,
-        models: { 'llama3:8b' => { tools_flag: true, thinking_flag: true } }
-      )
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :ollama).and_return({})
-
-      model = Legion::Extensions::Llm::Model::Info.new(id: 'llama3:8b', provider: :ollama)
-      offering = configured.send(:offering_from_model, model)
-
-      expect(offering.capability_sources[:tools]).to eq({ value: true, source: :model_override })
-      expect(offering.capability_sources[:thinking]).to eq({ value: true, source: :model_override })
-    end
   end
 end

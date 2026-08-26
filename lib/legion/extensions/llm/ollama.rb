@@ -5,7 +5,8 @@ require 'legion/extensions/llm/ollama/provider'
 require 'legion/extensions/llm/ollama/translator'
 require 'legion/extensions/llm/ollama/version'
 require 'legion/logging/helper'
-require 'legion/extensions/llm/ollama/actors/discovery_refresh'
+require 'legion/extensions/llm/ollama/helpers/callable'
+require 'legion/extensions/llm/ollama/actors/discovery'
 
 module Legion
   module Extensions
@@ -38,10 +39,6 @@ module Legion
 
         def self.provider_class
           Provider
-        end
-
-        def self.registry_publisher
-          @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(provider_family: PROVIDER_FAMILY)
         end
 
         # Single source of truth for Ollama instance discovery. The SSOT

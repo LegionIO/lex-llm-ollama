@@ -34,9 +34,22 @@ module Legion
       # `settings` runs the actual 1.4.2 resolution: the actor's
       # Legion::Extensions::Llm::Ollama::Actor::* namespace resolves to the
       # nested [:extensions][:llm][:ollama] node — the same live tree the
-      # discovery path reads via CredentialSources.setting.
+      # discovery path reads via CredentialSources.setting. The shared
+      # Discovery::Pipeline (mixed into the runner module) and the base actor
+      # call `log` and `handle_exception` on the includer, so the stand-in
+      # provides both: the real Logging::Helper for `log`, and a logging-only
+      # `handle_exception` that never re-raises (callers own `handled:`
+      # semantics and re-raise explicitly — the pipeline re-raises programming
+      # errors and CatalogFetchFailure after logging).
       module Lex
         include Legion::Settings::Helper
+        include Legion::Logging::Helper
+
+        def handle_exception(exception, level: :error, handled: true, **)
+          log.public_send(level) do
+            "[spec stand-in] exception=#{exception.class} handled=#{handled} message=#{exception.message}"
+          end
+        end
       end
     end
   end
@@ -50,9 +63,21 @@ require 'legion/extensions/llm/ollama'
 # lex-llm's own self-test specs, which must not run inside a provider gem's
 # suite.
 if Gem.loaded_specs['lex-llm']
-  # conformance.rb is the Canonical::Conformance fixture module the
-  # translator example group depends on (module-only, no examples).
-  %w[conformance.rb ssot_provider_examples.rb provider_translator_examples.rb].each do |kit_file|
+  # The kit loads by EXPLICIT file list (kit contract, 09 §5 — the documented
+  # **/*.rb glob loads lex-llm's own self-test specs, which LoadError outside
+  # the repo). conformance.rb is the Canonical::Conformance fixture module;
+  # the *_examples.rb files are the shared example groups; ssot_contract_*
+  # carries the B/F/R boundary groups (B1/B2 run in this suite against the
+  # real callable boundary).
+  %w[
+    conformance.rb
+    canonical_type_examples.rb
+    client_translator_examples.rb
+    provider_translator_examples.rb
+    provider_tool_rendering_examples.rb
+    ssot_contract_examples.rb
+    ssot_provider_examples.rb
+  ].each do |kit_file|
     path = File.join(Gem.loaded_specs['lex-llm'].full_gem_path,
                      'spec/legion/extensions/llm/conformance', kit_file)
     require path if File.exist?(path)
