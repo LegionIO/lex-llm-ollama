@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.7] - 2025-08-25
+
+### Fixed
+- **Thinking config contract** — reconcile to lex-llm 0.8.x `Canonical::Thinking::Config` (Data struct with `enabled`, `effort`, `budget`, `summary`, `metadata`). Removed the deleted `Canonical::Params#max_thinking_tokens` reference (`log_dropped_thinking_params` method and call site deleted — the member no longer exists). Removed the `Hash` branch in `enable_thinking?` — `request.thinking` is always a `Canonical::Thinking::Config` or nil. `apply_thinking_config` now emits `think: false` for a disabled Config (explicit off) and `think: true` for an enabled Config; omits the key entirely when no Config is present.
+
 ## [Unreleased]
 
 ### Changed

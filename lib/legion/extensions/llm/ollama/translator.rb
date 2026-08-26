@@ -163,7 +163,6 @@ module Legion
                                   end
             end
 
-            log_dropped_thinking_params(params)
             options
           end
 
@@ -291,28 +290,12 @@ module Legion
             payload[:options] = options unless options.empty?
           end
 
-          def log_dropped_thinking_params(params)
-            return unless params.max_thinking_tokens
-
-            log.debug do
-              '[llm][ollama-translator] action=drop_unsupported_param param=max_thinking_tokens ' \
-                "value=#{params.max_thinking_tokens} reason=ollama_not_supported"
-            end
-          end
-
           # -- Thinking configuration --
 
           def apply_thinking_config(payload, request)
-            return unless enable_thinking?(request)
+            return unless request.thinking.is_a?(Canonical::Thinking::Config)
 
-            payload[:think] = true
-          end
-
-          def enable_thinking?(request)
-            return true if request.thinking.is_a?(Canonical::Thinking::Config) && request.thinking.enabled?
-            return true if request.thinking.is_a?(Hash) && (request.thinking[:enabled] != false)
-
-            false
+            payload[:think] = request.thinking.enabled?
           end
 
           # -- Response format --
